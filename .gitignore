@@ -2,6 +2,7 @@
 \#*#
 .\#*
 
+<<<<<<< HEAD
 .DS_Store
 
 # C object files
@@ -24,3 +25,16 @@
 # Added by cargo
 
 /target
+=======
+*.o
+
+*.lnx
+
+.DS_Store
+
+/host
+/router
+/vhost
+/vrouter
+**/target
+>>>>>>> 54218ee (Initial commit; added .gitignore.)
