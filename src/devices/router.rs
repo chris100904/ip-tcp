@@ -23,6 +23,7 @@ impl Router {
     }    
 
     // should the routing table have pointer to interface? 
+    // each node does, so yes
     pub fn add_route(&mut self, destination: Ipv4Addr, prefix_length: usize, interface: NetworkInterface) {    
         self.routing_table.insert(destination, prefix_length).unwrap();
     }
