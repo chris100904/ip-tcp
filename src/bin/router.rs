@@ -76,3 +76,7 @@ impl Router {
         // TODO: do something with the packet
     }
 }
+
+fn main() {
+    
+}

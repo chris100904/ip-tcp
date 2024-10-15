@@ -3,5 +3,13 @@ name = "ip-epa127"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "host"
+path = "src/bin/host.rs"
+
+[[bin]]
+name = "router"
+path = "src/bin/router.rs"
+
 [dependencies]
 etherparse = "0.16"
