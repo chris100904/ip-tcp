@@ -12,6 +12,20 @@ pub struct Packet {
 }
 
 impl Packet {
+    // Create a new Packet struct using etherparse::PacketBuilder
+    pub fn new(src_ip: std::net::Ipv4Addr, dest_ip: std::net::Ipv4Addr, protocol: u8, payload: Vec<u8>) -> Packet {
+        let mut builder = etherparse::PacketBuilder::ipv4(src_ip, dest_ip, protocol);
+        let packet = builder.payload(payload).build().unwrap();
+        Packet {
+            src_ip,
+            dest_ip,
+            protocol,
+            payload,
+            ttl: packet.get_header::<Ipv4Header>().unwrap().ttl(),
+            header_checksum: packet.get_header::<Ipv4Header>().unwrap().header_checksum(),
+        }
+    }
+
     // Parse the IP header and return a Packet struct
     pub fn parse_ip_packet(raw_data: &[u8]) -> Result<Packet, String> {
         match Ipv4HeaderSlice::from_slice(raw_data) {
