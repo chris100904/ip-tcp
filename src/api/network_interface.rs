@@ -1,7 +1,14 @@
-use std::net::{UdpSocket, SocketAddr};
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+
+use super::parser::{InterfaceConfig, RoutingType};
+
+
+
 
 pub struct NetworkInterface {
     parent_device: Box<dyn Device>,
@@ -53,3 +60,4 @@ impl NetworkInterface {
     fn send_to_parent(&self, data: &[u8]) -> Result<(), std::io::Error> {
     }
 }
+

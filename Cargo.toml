@@ -13,3 +13,5 @@ path = "src/bin/router.rs"
 
 [dependencies]
 etherparse = "0.16"
+ipnet = "2.10.1"
+rustyline = "14.0.0"

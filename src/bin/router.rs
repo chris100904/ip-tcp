@@ -1,20 +1,34 @@
 use std::net::Ipv4Addr;
-use crate::network::{Packet, RoutingTrie};
+use crate::network::{Packet, RoutingTable};
 use crate::link::NetworkInterface;
 
 
 pub struct Router {
-    interfaces: Vec<NetworkInterface>,
-    routing_table: RoutingTrie,
-    ip_addr: Ipv4Addr,
+    pub interfaces: Vec<InterfaceConfig>,
+    pub neighbors: Vec<NeighborConfig>,
+    pub routing_mode: RoutingType,
+    pub static_routes: Vec<StaticRoute>, // should be empty?
+    pub rip_neighbors: Option<Vec<Ipv4Addr>>,
+    pub rip_periodic_update_rate: Option<u64>,
+    pub rip_timeout_threshold: Option<u64>, 
+
+    // routing table 
+    pub routing_table: RoutingTable,
 }
 
 impl Router {
-    pub fn new(ip_addr: Ipv4Addr) -> Router {
-        Router {
-            interfaces: Vec::new(),
-            routing_table: RoutingTrie::new(),
-            ip_addr
+    // TODO: intiialize the interface as part of the Host
+    pub fn new(ip_config: &IPConfig) -> Host {
+        let mut routing_table = RoutingTable::new(ip_config);
+        Router { 
+            interfaces: ip_config.interfaces, // Assume that lnx is properly formatted
+            neighbors: ip_config.neighbors, routing_mode:
+            ip_config.routing_mode, 
+            static_routes: ip_config.static_routes,
+            rip_neighbors: ip_config.rip_neighbors,
+            rip_periodic_update_rate: ip_config.rip_periodic_update_rate,
+            rip_timeout_threshold: ip_config.rip_timeout_threshold,
+            routing_table,
         }
     }
 
@@ -78,5 +92,23 @@ impl Router {
 }
 
 fn main() {
+    // use `new` from parse to get the IPConfig
+    let args: Vec<String> = env::args().collect();  
+    if args.len() < 3 {
+        eprintln!("Usage: {} --config <lnx-file-path>", args[0]);
+        std::process::exit(1); 
+    }
+    // use the IPConfig and pass into `parse`, the return should be the updated IPConfig
+    let lnx_file_path = &args[2];
+    let mut ip_config: IPConfig = match parser::try_new(lnx_file_path) {
+        Ok(config) => config, 
+        Err(e) => {
+            eprintln!("Failed to parse the lnx file: {}", e);
+            std::process::exit(1); 
+        }
+    };
+    parser::parse(&ip_config);
     
+    // get all necessary things and pass it into new
+    Router::new(&ip_config);
 }
