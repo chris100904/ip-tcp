@@ -11,7 +11,8 @@ pub struct Route {
 // route_list: Vec<Route>,
 pub struct Table {
   routing_table: HashMap<u8, HashMap<u32, InterfaceConfig>>,
-  keys: Vec<u8>
+  keys: Vec<u8>,
+  routes: Vec<Route>,
 }
 
 impl Table {
@@ -32,6 +33,7 @@ impl Table {
 
   pub fn new(&self, ip_config: &IPConfig) -> Self {
     let mut routing_table = HashMap::<u8, HashMap<u32, InterfaceConfig>>::new();
+    let mut routes = Vec::new();
     for interface in &ip_config.interfaces {
       let prefix_len = interface.assigned_prefix.prefix_len();
       let hash = Table::hash(&interface.assigned_ip, prefix_len);
@@ -47,11 +49,21 @@ impl Table {
         .entry(prefix_len)
         .or_insert_with(HashMap::new)
         .insert(hash, interface_clone);
+
+      // Create a new Route object and add it to the routes vector
+      let route = Route {
+          routing_mode: RoutingType::Local, // or whatever routing type is applicable
+          ip_addr: interface.assigned_ip,
+          prefix: prefix_len,
+          next_hop: interface_clone,
+          cost: 0,
+      };
+      routes.push(route);
     }
 
     let keys = Table::sort_keys(&routing_table);
 
-    Table { routing_table, keys }
+    Table { routing_table, keys, routes }
   }
   
   // add something to the table

@@ -1,51 +1,34 @@
 use rustyline::error::ReadlineError;
-use rustyline::Editor; 
+use rustyline::{DefaultEditor, Result};
 use std::sync::mpsc::Sender;
+use crate::api::Command;
 
-fn list_interfaces() {}
-
-fn list_neighbors() {}
-
-fn list_routes() {}
-
-fn disable_interface(ifname: &str) {}
-
-fn enable_interface(ifname: &str) {}
-
-fn send_test_packet(addr: &str, message: &str){
-
-}
-
-fn repl() {
-    let mut rl = Editor::<()>::new(); 
-
+fn repl(sender: Sender<Command>) -> Result<()> {
+    let mut rl = DefaultEditor::new()?;
+    
     loop {
-        let readline= rl.readline("> ");
+        let readline = rl.readline("> ");
         match readline {
             Ok(line) => {
-                rl.add_history_entry(line.as_str());
-
-                // split the input command into parts
                 let args: Vec<&str> = line.split_whitespace().collect();
                 if args.is_empty() {
-                    continue; 
+                    continue;
                 }
 
-                // match the command
                 match args[0] {
-                    "li" => list_interfaces(),
-                    "ln" => list_neighbors(),
-                    "lr" => list_routes(),
+                    "li" => sender.send(Command::ListInterfaces).unwrap(),
+                    "ln" => sender.send(Command::ListNeighbors).unwrap(),
+                    "lr" => sender.send(Command::ListRoutes).unwrap(),
                     "down" => {
                         if args.len() == 2 {
-                            disable_interface(args[1]);
+                            sender.send(Command::DisableInterface(args[1].to_string())).unwrap();
                         } else {
                             println!("Usage: down <ifname>");
                         }
                     }
                     "up" => {
                         if args.len() == 2 {
-                            enable_interface(args[1]);
+                            sender.send(Command::EnableInterface(args[1].to_string())).unwrap();
                         } else {
                             println!("Usage: up <ifname>");
                         }
@@ -54,12 +37,15 @@ fn repl() {
                         if args.len() >= 3 {
                             let addr = args[1];
                             let message = &line[args[0].len() + args[1].len() + 2..];
-                            send_test_packet(addr, message);
+                            sender.send(Command::SendTestPacket(addr.to_string(), message.to_string())).unwrap();
                         } else {
                             println!("Usage: send <addr> <message>");
                         }
                     }
-                    "exit" => break,
+                    "exit" => {
+                        sender.send(Command::Exit).unwrap();
+                        break;
+                    }
                     _ => println!("Unknown command: {}", args[0]),
                 }
             }
@@ -77,4 +63,6 @@ fn repl() {
             }
         }
     }
+
+    Ok(())
 }
