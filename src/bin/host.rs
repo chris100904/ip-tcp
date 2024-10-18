@@ -1,4 +1,7 @@
+use ip_epa127::api::network_interface::NetworkInterface;
 use ip_epa127::api::parser::{self, IPConfig};
+use ip_epa127::api::repl::repl;
+use ip_epa127::api::{Command, InterfaceState};
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use etherparse::{err::ip, Ipv4Header, Ipv4HeaderSlice};
 use crate::packet::Packet;
@@ -6,7 +9,6 @@ use std::env;
 use crate::network::{Packet, RoutingTable};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::mpsc;
-use crate::api::{Command, InterfaceState};
 
 
 // Define the command types that the REPL can send to the Host
@@ -21,22 +23,24 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new(ip_config: &IPConfig) -> Host {
+    pub fn new(ip_config: &IPConfig, packet_sender: Receiver<Vec<u8>>) -> Host {
         let forwarding_table = RoutingTable::new(&ip_config);
+
+        let interface = InterfaceState {
+            config: ip_config.interfaces[0],
+            enabled: true,
+            interface: NetworkInterface::new(ip_config.interfaces[0], packet_sender.clone()),
+        };
+
         Host {
-            // interface: ip_config.interfaces[0],
-            interface: InterfaceState {
-                config: ip_config.interfaces[0],
-                enabled: true,
-            },
-            neighbors: ip_config.neighbors,
+            interface,
+            neighbors: ip_config.neighbors.clone(),
             routing_mode: ip_config.routing_mode,
-            static_routes: ip_config.static_routes,
+            static_routes: ip_config.static_routes.clone(),
             forwarding_table,
         }
     }
 
-    // The Host will listen for REPL commands and process them
     pub fn listen_for_commands(&mut self, receiver: Receiver<Command>) {
         loop {
             match receiver.recv() {
@@ -50,6 +54,17 @@ impl Host {
                         Command::SendTestPacket(addr, msg) => self.send_test_packet(&addr, &msg),
                         Command::Exit => break,
                     }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    pub fn receive_from_interface(&mut self, receiver: Receiver<Vec<u8>>) {
+        loop {
+            match receiver.recv() {
+                Ok(packet) => {
+                    self.process_packet(&packet);
                 }
                 Err(_) => break,
             }
@@ -117,7 +132,10 @@ impl Host {
         let dest_ip = Ipv4Addr::from_str(addr).unwrap();
         let data = message.as_bytes();
         let packet = Packet::new(self.ip_addr, IpAddr::V4(dest_ip), 17, data.to_vec());
-        self.socket.send_to(&packet.to_bytes(), 0).unwrap();
+        // should consult the routing table
+        let interface = self.forwarding_table.lookup(dest_ip).unwrap();
+        interface.send_data(dest_ip)
+        // self.socket.send_to(&packet.to_bytes(), 0).unwrap();
     }
 
     // TODO: Probably delete this
@@ -166,8 +184,9 @@ fn main() {
         }
     };
     parser::parse(&ip_config);
+    let (packet_sender, packet_receiver) = mpsc::channel::<Vec<u8>>();
 
-    let mut host = Host::new(&ip_config);
+    let mut host = Host::new(&ip_config, packet_sender);
 
     // Create a channel for communication between the REPL and the Host
     let (tx, rx) = mpsc::channel();
@@ -179,4 +198,6 @@ fn main() {
 
     // The Host listens for commands from the REPL
     host.listen_for_commands(rx);
+
+    host.receive_from_interface(packet_receiver);
 }

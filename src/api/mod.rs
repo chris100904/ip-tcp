@@ -1,3 +1,4 @@
+use network_interface::NetworkInterface;
 use parser::InterfaceConfig;
 
 pub mod network_interface;
@@ -20,4 +21,5 @@ pub enum Command {
 pub struct InterfaceState {
     pub config: InterfaceConfig,
     pub enabled: bool,
+    pub interface: NetworkInterface,
 }

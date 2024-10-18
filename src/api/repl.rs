@@ -3,7 +3,7 @@ use rustyline::{DefaultEditor, Result};
 use std::sync::mpsc::Sender;
 use crate::api::Command;
 
-fn repl(sender: Sender<Command>) -> Result<()> {
+pub fn repl(sender: Sender<Command>) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
     
     loop {
