@@ -1,13 +1,17 @@
+use std::env;
 use std::net::Ipv4Addr;
-use crate::network::{Packet, RoutingTable};
-use crate::link::NetworkInterface;
+use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::mpsc;
+use ip_epa127::api::network_interface::{self, NetworkInterface};
 use ip_epa127::api::repl::repl;
-use ip_epa127::api::{Command, InterfaceState};
+use ip_epa127::api::packet::Packet;
+use ip_epa127::api::routing_table::{Table, NextHop};
+use ip_epa127::api::{Command, InterfaceStruct};
+use ip_epa127::api::parser::{IPConfig, InterfaceConfig, NeighborConfig, RoutingType, StaticRoute};
 
 pub struct Router {
-    pub interfaces: Vec<InterfaceConfig>,
+    pub interfaces: Vec<InterfaceStruct>,
     pub neighbors: Vec<NeighborConfig>,
     pub routing_mode: RoutingType,
     pub static_routes: Vec<StaticRoute>, // should be empty?
@@ -16,19 +20,24 @@ pub struct Router {
     pub rip_timeout_threshold: Option<u64>, 
 
     // routing table 
-    pub routing_table: RoutingTable,
+    pub routing_table: Table,
 }
 
 impl Router {
     // TODO: intiialize the interface as part of the Host
-    pub fn new(ip_config: &IPConfig) -> Host {
-        let mut routing_table = RoutingTable::new(ip_config);
+    pub fn new(ip_config: &IPConfig, packet_sender: Sender<Vec<u8>>) -> Router {
+        let mut routing_table = Table::new(ip_config);
+        let mut ifstructs: Vec<InterfaceStruct> = Vec::new();
+        for interface in ip_config.interfaces.clone() {
+            ifstructs.push(InterfaceStruct::new(interface, packet_sender.clone()));
+        }
+        
         Router { 
-            interfaces: ip_config.interfaces, // Assume that lnx is properly formatted
-            neighbors: ip_config.neighbors, routing_mode:
-            ip_config.routing_mode, 
-            static_routes: ip_config.static_routes,
-            rip_neighbors: ip_config.rip_neighbors,
+            interfaces: ifstructs, // Assume that lnx is properly formatted
+            neighbors: ip_config.neighbors.clone(), 
+            routing_mode: ip_config.routing_mode.clone(), 
+            static_routes: ip_config.static_routes.clone(),
+            rip_neighbors: ip_config.rip_neighbors.clone(),
             rip_periodic_update_rate: ip_config.rip_periodic_update_rate,
             rip_timeout_threshold: ip_config.rip_timeout_threshold,
             routing_table,
@@ -54,22 +63,39 @@ impl Router {
         }
     }
 
+    pub fn receive_from_interface(&mut self, receiver: Receiver<Vec<u8>>) {
+        loop {
+            match receiver.recv() {
+                Ok(packet) => {
+                    todo!();
+                    // self.process_packet(&packet);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
     pub fn list_interfaces(&self) {
         println!("Name  Addr/Prefix State");
         
-        for ifstate in &self.interfaces {
-            println!("{}  {:<15} {}", ifstate.config.name, format!("{}/{}", ifstate.config.assigned_ip, ifstate.config.assigned_prefix.prefix_len()), if ifstate.enabled {"up"} else {"down"});
+        for interface in &self.interfaces {
+            println!("{}  {:<15} {}", 
+                interface.config.name, 
+                format!("{}/{}", 
+                    interface.config.assigned_ip, 
+                    interface.config.assigned_prefix.prefix_len()), 
+                if interface.enabled {"up"} else {"down"});
         }
     }
 
     pub fn list_neighbors(&self) {
         println!("Iface VIP  UDPAddr");
-        for ifstate in &self.interface {
-            if ifstate.enabled {
+        for interface in &self.interfaces {
+            if interface.enabled {
                 for neighbor in &self.neighbors {
-                    // to check that we are connecting the right interfaces together
-                    if neighbor.interface_name == ifstate.config.name {
-                        println!("{}     {}     {}", ifstate.config.name, neighbor.dest_addr, neighbor.udp_addr.to_string() + ":" + &neighbor.udp_port.to_string());
+                    if neighbor.interface_name == interface.config.name {
+                        println!("{}     {}     {}", interface.config.name, neighbor.dest_addr, 
+                            neighbor.udp_addr.to_string() + ":" + &neighbor.udp_port.to_string());
                     }
                 }
             }
@@ -78,34 +104,42 @@ impl Router {
 
     pub fn list_routes(&self) {
         println!("T       Prefix   Next hop   Cost");
-        for route in &self.forwarding_table.routes {
-            match route.next_hop {
-                InterfaceConfig::Local { ifname, prefix } => {
-                    println!("L  {:<15}  LOCAL:{}     0", format!("{}/{}", prefix.addr(), prefix.prefix_len()), ifname);
+        for route in &self.routing_table.get_routes() {
+            let routing_type = match route.routing_mode {
+                RoutingType::None => "L".to_string(),
+                RoutingType::Static => "S".to_string(),
+                RoutingType::Rip => "R".to_string()
+            };
+            let prefix = route.prefix.to_string();
+            let next_hop: String = match &route.next_hop {
+                NextHop::Interface(interface) => {
+                    format!("LOCAL:{}", interface.name).to_string()
+                },
+                NextHop::IPAddress(ip_addr) => {
+                    ip_addr.to_string()
                 }
-                InterfaceConfig::Rip { next_hop, cost, prefix } => {
-                    println!("R  {:<15}  {}     {}", format!("{}/{}", prefix.addr(), prefix.prefix_len()), next_hop, cost);
-                }
-                InterfaceConfig::Static { next_hop, prefix } => {
-                    println!("S  {:<15}  {}     -", format!("{}/{}", prefix.addr(), prefix.prefix_len()), next_hop);
-                }
-            }
+            };
+            let cost = match route.cost{
+                Some(cost) => cost.to_string(),
+                None => "-".to_string()
+            };
+            println!("{}       {}   {}   {}", routing_type, prefix, next_hop, cost);
         }
     }
 
     pub fn disable_interface(&mut self, ifname: &str) {
-        for ifstate in &mut self.interface {
-            if ifstate.config.name == ifname {
-                ifstate.enabled = false;
+        for ifstruct in &mut self.interfaces {
+            if ifstruct.config.name == ifname {
+                ifstruct.enabled = false;
                 break;
             }
         }
     }
 
-    pub fn enable_interface(&self, ifname: &str) {
-        for ifstate in &mut self.interface {
-            if ifstate.config.name == ifname {
-                ifstate.enabled = true;
+    pub fn enable_interface(&mut self, ifname: &str) {
+        for ifstruct in &mut self.interfaces {
+            if ifstruct.config.name == ifname {
+                ifstruct.enabled = true;
                 break;
             }
         }
@@ -114,24 +148,28 @@ impl Router {
     pub fn send_test_packet(&self, addr: &str, message: &str) {
         let dest_ip = Ipv4Addr::from_str(addr).unwrap();
         let data = message.as_bytes();
-        let packet = Packet::new(self.ip_addr, IpAddr::V4(dest_ip), 17, data.to_vec());
+        // let packet = Packet::new(self.ip_addr, dest_ip, 17, data.to_vec());
 
-        self.forward_packet(&packet, dest_ip).unwrap();
+        // self.forward_packet(&packet, dest_ip).unwrap();
         // self.socket.send_to(&packet.to_bytes(), 0).unwrap();
+
+        todo!()
     }
 
     pub fn add_interface(&mut self, interface: NetworkInterface) {
-        self.interfaces.push(interface);
-    }    
+        todo!()
+    }
 
     // should the routing table have pointer to interface? 
     // each node does, so yes
     pub fn add_route(&mut self, destination: Ipv4Addr, prefix_length: usize, interface: NetworkInterface) {    
-        self.routing_table.insert(destination, prefix_length).unwrap();
+        // self.routing_table.insert(destination, prefix_length).unwrap();
+        todo!()
     }
 
     pub fn remove_route(&mut self, destination: Ipv4Addr, prefix_length: usize) {
-        self.routing_table.remove(destination, prefix_length).unwrap();
+        // self.routing_table.remove(destination, prefix_length).unwrap();
+        todo!()
     }
 
     // pub fn lookup_route(&self, destination: Ipv4Addr) -> Option<NetworkInterface> {
@@ -151,30 +189,36 @@ impl Router {
             },
         };
 
+        todo!();
         // send the packet to the interface
-        interface.send_data(destination_ip, packet)?;
+        //interface.send_data(destination_ip, packet)?;
         Ok(())
     }
 
     // return error as well? 
-    pub fn handle_received_packet(&self, interface: &NetworkInterface, raw_packet: &[u8]) {
-        match Packet::parse_ip_packet(raw_packet) {
-            Ok(packet) => {
-                if packet.is_local() {
-                    self.process_local_packet(packet);
-                } else {
-                    self.forward_packet(packet);
-                }
-            },
-            Err(err) => {
-                eprintln!("Failed to parse received packet: {}", err);
-            },
+    pub fn handle_received_packet(&self, interface: &NetworkInterface, packet: Packet) {
+        let mut is_local = false;
+
+        // Iterate through all the interfaces to check if the packet is local
+        for iface in &self.interfaces {
+            if packet.is_local(iface.config.assigned_ip){
+                is_local = true;
+                break; 
+            }
+        }
+
+        if is_local {
+            self.process_local_packet(packet);
+        } else {
+            // forward the packet to destination
+            self.forward_packet(&packet, packet.dest_ip);
         }
     }
 
     // process local packets
     fn process_local_packet(&self, packet: Packet) {
-        println!("Received local packet from {}: {}", packet.src_ip, packet.data);
+        todo!("do something with packet");
+        // println!("Received local packet from {}: {}", packet.src_ip, packet.data);
         // TODO: do something with the packet
     }
 }
@@ -188,17 +232,18 @@ fn main() {
     }
     // use the IPConfig and pass into `parse`, the return should be the updated IPConfig
     let lnx_file_path = &args[2];
-    let mut ip_config: IPConfig = match parser::try_new(lnx_file_path) {
+    let mut ip_config: IPConfig = match IPConfig::try_new(lnx_file_path.clone()) {
         Ok(config) => config, 
         Err(e) => {
             eprintln!("Failed to parse the lnx file: {}", e);
             std::process::exit(1); 
         }
     };
-    parser::parse(&ip_config);
     
+    let (packet_sender, packet_receiver) = mpsc::channel::<Vec<u8>>();
+
     // get all necessary things and pass it into new
-    let mut router = Router::new(&ip_config);
+    let mut router = Router::new(&ip_config, packet_sender);
 
     // Create a channel for communication between the REPL and the Host
     let (tx, rx) = mpsc::channel();
@@ -210,4 +255,6 @@ fn main() {
 
     // The Host listens for commands from the REPL
     router.listen_for_commands(rx);
+
+    router.receive_from_interface(packet_receiver);
 }

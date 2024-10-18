@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::thread;
 use std::sync::{Arc, Mutex};
@@ -9,7 +7,7 @@ use super::parser::{InterfaceConfig, RoutingType};
 
 
 
-
+#[derive(Debug)]
 pub struct NetworkInterface {
     udp_socket: Arc<Mutex<UdpSocket>>,
 }
@@ -20,7 +18,7 @@ pub trait Device {
 }
 
 impl NetworkInterface {
-    pub fn new(ip_config: InterfaceConfig, packet_sender: Sender<Vec<u8>>) -> NetworkInterface {
+    pub fn new(ip_config: &InterfaceConfig, packet_sender: Sender<Vec<u8>>) -> NetworkInterface {
         let udp_addr = ip_config.udp_addr;
         let udp_port = ip_config.udp_port;
         let udp_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(udp_addr), udp_port)).unwrap();
@@ -54,6 +52,7 @@ impl NetworkInterface {
         }
     }
 
+    // pub fn send_data(&self, packet: Packet, )
     // pub fn send_data(&self, destination_ip: Ipv4Addr, data: &[u8]) -> Result<(), std::io::Error> {
     //     self.udp_socket.lock().send_to(data, 0, &format!("{}:0", destination_ip))?;
     //     Ok(())

@@ -67,11 +67,21 @@ fn str_to_udp(input: &str) -> (Ipv4Addr, u16) {
     )
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum RoutingType {
     None,
     Static,
     Rip,
+}
+
+impl RoutingType {
+    pub fn clone(&self) -> RoutingType {
+        match self {
+            RoutingType::None => RoutingType::None,
+            RoutingType::Static => RoutingType::Static,
+            RoutingType::Rip=> RoutingType::Rip,
+        }
+    }
 }
 
 impl Default for RoutingType {
@@ -93,7 +103,7 @@ impl TryFrom<&str> for RoutingType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct InterfaceConfig {
     pub name: String,
     // Ip address of the interface + prefix
@@ -127,7 +137,19 @@ impl TryFrom<Vec<&str>> for InterfaceConfig {
     }
 }
 
-#[derive(Debug)]
+impl InterfaceConfig {
+    fn clone(&self) -> InterfaceConfig {
+        return InterfaceConfig {
+            name: self.name.clone(),
+            assigned_prefix: self.assigned_prefix.clone(),
+            assigned_ip: self.assigned_ip.clone(),
+            udp_addr: self.udp_addr.clone(),
+            udp_port: self.udp_port.clone()
+          };
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct NeighborConfig {
     pub dest_addr: Ipv4Addr,
     pub udp_addr: Ipv4Addr,
@@ -160,6 +182,17 @@ impl TryFrom<Vec<&str>> for NeighborConfig {
             udp_port,
             interface_name: String::from(tokens[5]),
         })
+    }
+}
+
+impl NeighborConfig {
+    pub fn clone(&self) -> NeighborConfig {
+        return NeighborConfig {
+            dest_addr: self.dest_addr.clone(),
+            udp_addr: self.udp_addr.clone(),
+            udp_port: self.udp_port.clone(),
+            interface_name: self.interface_name.clone(),
+        }
     }
 }
 

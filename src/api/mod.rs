@@ -1,3 +1,5 @@
+use std::sync::mpsc::Sender;
+
 use network_interface::NetworkInterface;
 use parser::InterfaceConfig;
 
@@ -6,7 +8,6 @@ pub mod packet;
 pub mod parser;
 pub mod repl;
 pub mod routing_table;
-
 
 pub enum Command {
     ListInterfaces,
@@ -18,8 +19,19 @@ pub enum Command {
     Exit,
 }
 
-pub struct InterfaceState {
+#[derive(Debug)]
+pub struct InterfaceStruct {
     pub config: InterfaceConfig,
     pub enabled: bool,
     pub interface: NetworkInterface,
+}
+
+impl InterfaceStruct {
+    pub fn new(config: InterfaceConfig, packet_sender: Sender<Vec<u8>> ) -> InterfaceStruct {
+        return InterfaceStruct {
+            interface: NetworkInterface::new(&config, packet_sender),
+            config: config,
+            enabled: true,
+        }
+    }
 }

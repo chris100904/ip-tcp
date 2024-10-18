@@ -1,4 +1,6 @@
-use etherparse::{Ipv4HeaderSlice, Ipv4Header};
+use etherparse::{Ipv4Header, Ipv4HeaderSlice, PacketBuilder, IpNumber};
+// use etherparse::checksum::u32_16bit_word;
+use std::net::Ipv4Addr;
 
 #[derive(Debug)]
 pub struct Packet {
@@ -13,16 +15,41 @@ pub struct Packet {
 
 impl Packet {
     // Create a new Packet struct using etherparse::PacketBuilder
-    pub fn new(src_ip: std::net::Ipv4Addr, dest_ip: std::net::Ipv4Addr, protocol: u8, payload: Vec<u8>) -> Packet {
-        let mut builder = etherparse::PacketBuilder::ipv4(src_ip, dest_ip, protocol);
-        let packet = builder.payload(payload).build().unwrap();
+    pub fn new(src_ip: Ipv4Addr, dest_ip: Ipv4Addr, protocol: u8, payload: Vec<u8>) -> Packet {
+        // Create the PacketBuilder for IPv4
+        let builder = PacketBuilder::ipv4(
+            src_ip.octets(),    // Source IP address
+            dest_ip.octets(),   // Destination IP address
+            20                 // TTL (time to live)
+        );
+
+        let mut result = Vec::<u8>::with_capacity(builder.size(payload.len()));
+        builder.write(&mut result, Self::protocol_to_ipnumber(protocol), &payload).unwrap();
+
         Packet {
             src_ip,
             dest_ip,
-            protocol,
-            payload,
-            ttl: packet.get_header::<Ipv4Header>().unwrap().ttl(),
-            header_checksum: packet.get_header::<Ipv4Header>().unwrap().header_checksum(),
+            protocol,   // Custom protocol (0 for Test Protocol, 200 for RIP)
+            payload: result,   // The raw byte representation of the payload
+            ttl: 20,           // TTL field (set to 20 here, can be changed)
+            header_checksum: 0, // You can set the checksum manually if needed
+        }
+    }
+
+    // Convert custom protocol number to IpNumber
+    fn protocol_to_ipnumber(protocol: u8) -> IpNumber {
+        match protocol {
+            0 => IpNumber::UDP, // Assuming you create this variant in your enum
+            200 => IpNumber::IPV4, // Similarly for RIP
+            _ => IpNumber::from(protocol), // Use the default conversion for other protocols
+        }
+    }
+
+    fn ipnumber_to_protocol(ipnumber: IpNumber) -> u8 {
+        match ipnumber {
+            IpNumber::UDP => 0,
+            IpNumber::IPV4 => 200,
+            _ => 50, // just random for now
         }
     }
 
@@ -44,7 +71,7 @@ impl Packet {
                 Ok(Packet {
                     src_ip,
                     dest_ip,
-                    protocol,
+                    protocol: Self::ipnumber_to_protocol(protocol),
                     payload,
                     ttl,
                     header_checksum,
@@ -54,74 +81,78 @@ impl Packet {
         }
     }
 
-    // Serialize the packet
-    pub fn to_bytes(&self) -> Vec<u8> {
-        // Build the IP header and append payload
-        let mut ip_header = Ipv4Header::new(
-            (self.payload.len() + 20) as u16, 
-            self.ttl,
-            self.protocol,                    
-            self.src_ip.octets(),             
-            self.dest_ip.octets()             
-        );
+    // // Serialize the packet
+    // pub fn to_bytes(&self) -> Vec<u8> {
+    //     // Build the IP header and append payload
+    //     let mut ip_header = Ipv4Header::new(
+    //         (self.payload.len() + 20) as u16, 
+    //         self.ttl,
+    //         self.protocol,                    
+    //         self.src_ip.octets(),             
+    //         self.dest_ip.octets()             
+    //     );
         
-        // Recompute checksum for the header
-        ip_header.header_checksum = Packet::compute_checksum(&ip_header);
+    //     // Recompute checksum for the header
+    //     ip_header.header_checksum = Packet::compute_checksum(&ip_header);
 
-        // Serialize header and payload into raw bytes
-        let mut packet_bytes = Vec::new();
-        packet_bytes.extend_from_slice(&ip_header.to_bytes());
-        packet_bytes.extend_from_slice(&self.payload);
+    //     // Serialize header and payload into raw bytes
+    //     let mut packet_bytes = Vec::new();
+    //     packet_bytes.extend_from_slice(&ip_header.to_bytes());
+    //     packet_bytes.extend_from_slice(&self.payload);
 
-        packet_bytes
-    }
-    // Calculate checksum for the packet
+    //     packet_bytes
+    // }
+
+    // Compute the checksum using the netstack package
     pub fn compute_checksum(header: &Ipv4Header) -> u16 {
-        let mut checksum = 0;
         let header_bytes = header.to_bytes();
+        let mut checksum: u32 = 0;
 
+        // Sum all 16-bit words in the header
         for i in (0..header_bytes.len()).step_by(2) {
-            // create a u16 word by shifting the first byte 8 bits left and adding the second byte
-            let word = ((header_bytes[i] as u16) << 8) | (header_bytes[i + 1] as u16);
+            let word = if i + 1 < header_bytes.len() {
+                (header_bytes[i] as u32) << 8 | (header_bytes[i + 1] as u32) // Combine two bytes into one 16-bit word
+            } else {
+                (header_bytes[i] as u32) << 8 // If there's an odd byte, pad with zero
+            };
 
-            // use wrapping_add in case there is overflow (shouldn't exceed max value?)
-            checksum = checksum.wrapping_add(word);
+            checksum = checksum.wrapping_add(word); // Add the word to the checksum
         }
 
-        // handle case where checksum exceeds 16 bits by adding the overflow bits
+        // Fold the 32-bit sum to 16 bits
         while checksum >> 16 != 0 {
-            checksum = (checksum >> 16) + (checksum & 0xffff);
+            checksum = (checksum & 0xffff) + (checksum >> 16);
         }
 
-        !checksum as u16
+        // Return the one's complement of the checksum
+        !(checksum as u16)
     }
 
     // Extract the destination IP address from a raw packet
-    pub fn extract_dest_ip(raw_packet: &[u8]) -> IpAddr {
+    pub fn extract_dest_ip(raw_packet: &[u8]) -> Result<Ipv4Addr, String> {
         match Ipv4HeaderSlice::from_slice(raw_packet) {
-            Ok(ip_slice) => ip_slice.destination_addr(),
+            Ok(ip_slice) => Ok(ip_slice.destination_addr()),
             Err(err) => Err(format!("Failed to extract destination IP: {}", err)),
         }
     }
 
-    // Extract the source IP address from a raw packet
-    pub fn extract_src_ip(raw_packet: &[u8]) -> IpAddr {
+    pub fn extract_src_ip(raw_packet: &[u8]) -> Result<Ipv4Addr, String> {
         match Ipv4HeaderSlice::from_slice(raw_packet) {
-            Ok(ip_slice) => ip_slice.source_addr(),
+            Ok(ip_slice) => Ok(ip_slice.source_addr()),
             Err(err) => Err(format!("Failed to extract source IP: {}", err)),
         }
     }
 
     // Extract the protocol from a raw packet
-    pub fn extract_protocol(raw_packet: &[u8]) -> u8 {
+    pub fn extract_protocol(raw_packet: &[u8]) -> Result<u8, String> {
         match Ipv4HeaderSlice::from_slice(raw_packet) {
-            Ok(ip_slice) => ip_slice.protocol(),
+            Ok(ip_slice) => Ok(Self::ipnumber_to_protocol(ip_slice.protocol())),
             Err(err) => Err(format!("Failed to extract protocol: {}", err)),
         }
     }
 
     // Check if packet is local
-    pub fn is_local(&self) -> bool {
-        self.src_ip.octets() == self.dest_ip.octets()
+    pub fn is_local(&self, curr_ip: Ipv4Addr) -> bool {
+        curr_ip.octets() == self.dest_ip.octets()
     }
 }
