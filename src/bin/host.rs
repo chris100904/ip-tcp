@@ -24,7 +24,7 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new(ip_config: &IPConfig, packet_sender: Sender<Vec<u8>>) -> Host {
+    pub fn new(ip_config: &IPConfig, packet_sender: Sender<Packet>) -> Host {
         let interface = InterfaceStruct {
             config: ip_config.interfaces[0].clone(),
             enabled: true,
@@ -59,12 +59,12 @@ impl Host {
         }
     }
 
-    pub fn receive_from_interface(&mut self, receiver: Receiver<Vec<u8>>) {
+    pub fn receive_from_interface(&mut self, receiver: Receiver<Packet>) {
         loop {
             match receiver.recv() {
                 Ok(packet) => {
-                    todo!();
-                    // self.process_packet(&packet);
+                    // todo!();
+                    self.process_packet(packet);
                 }
                 Err(_) => break,
             }
@@ -159,43 +159,31 @@ impl Host {
     //     }
     // }
 
-    // TODO: IP FORWARDING
-    pub fn process_local_packet(&mut self, packet: Packet) {
-        if let Some(neighbor) = self.neighbors.iter().find(|n| n.dest_addr == packet.src_ip) {
-            // Send the packet to the UDP port of the neighbor
-            let udp_addr = neighbor.udp_addr;
-            let udp_port = neighbor.udp_port;
+    // // TODO: IP FORWARDING
+    // pub fn process_local_packet(&mut self, packet: Packet) {
+    //     if let Some(neighbor) = self.neighbors.iter().find(|n| n.dest_addr == packet.src_ip) {
+    //         // Send the packet to the UDP port of the neighbor
+    //         let udp_addr = neighbor.udp_addr;
+    //         let udp_port = neighbor.udp_port;
 
-            todo!();
-            // Assuming you have a method to send data to a specific UDP address
-            // let result = self.interface.interface.send_data(udp_addr, packet.to_bytes());
+    //         todo!();
+    //         // Assuming you have a method to send data to a specific UDP address
+    //         // let result = self.interface.interface.send_data(udp_addr, packet.to_bytes());
 
-            // match result {
-            //     Ok(_) => println!("Sent packet to {}:{}", udp_addr, udp_port),
-            //     Err(e) => eprintln!("Failed to send packet: {}", e),
-            // }
-        } else {
-            eprintln!("No neighbor found for source IP: {}", packet.src_ip);
-        }
-    }
+    //         // match result {
+    //         //     Ok(_) => println!("Sent packet to {}:{}", udp_addr, udp_port),
+    //         //     Err(e) => eprintln!("Failed to send packet: {}", e),
+    //         // }
+    //     } else {
+    //         eprintln!("No neighbor found for source IP: {}", packet.src_ip);
+    //     }
+    // }
 
-    // TODO: Update this (should be called when we receive packet down to up from the interface)
+    /* If a Host receives a packet, that means that the packet has reached a destination. 
+       Hosts are endpoints in the network, so we can just terminate and print here. */
     pub fn process_packet(&mut self, packet: Packet) {
-        if self.interface.config.assigned_ip == packet.dest_ip {
-            self.process_local_packet(packet);
-        } else {
-            match self.forwarding_table.lookup(packet.dest_ip) {
-                Some(interface) => {
-                    // send to specific interface
-                }
-                None => {
-                    
-                }
-            }
-        }
-        // local? 
-
-        // not local
+        println!("Received test packet: Src: {}, Dst: {}, TTL:  {}, Data:  {}", 
+            packet.src_ip, packet.dest_ip, packet.ttl, String::from_utf8(packet.payload).unwrap());
     }
 }
 
@@ -206,14 +194,14 @@ fn main() {
         std::process::exit(1);
     }
     let lnx_file_path = &args[2];
-    let mut ip_config: IPConfig = match IPConfig::try_new(lnx_file_path.clone()) {
+    let ip_config: IPConfig = match IPConfig::try_new(lnx_file_path.clone()) {
         Ok(config) => config,
         Err(e) => {
             eprintln!("Failed to parse the lnx file: {}", e);
             std::process::exit(1);
         }
     };
-    let (packet_sender, packet_receiver) = mpsc::channel::<Vec<u8>>();
+    let (packet_sender, packet_receiver) = mpsc::channel::<Packet>();
 
     let mut host = Host::new(&ip_config, packet_sender);
 

@@ -1,9 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::thread;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
+use crate::api::packet::Packet;
 use std::sync::mpsc::Sender;
-use super::parser::{InterfaceConfig, RoutingType};
+use super::parser::InterfaceConfig;
 
 
 
@@ -18,7 +18,7 @@ pub trait Device {
 }
 
 impl NetworkInterface {
-    pub fn new(ip_config: &InterfaceConfig, packet_sender: Sender<Vec<u8>>) -> NetworkInterface {
+    pub fn new(ip_config: &InterfaceConfig, packet_sender: Sender<Packet>) -> NetworkInterface {
         let udp_addr = ip_config.udp_addr;
         let udp_port = ip_config.udp_port;
         let udp_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(udp_addr), udp_port)).unwrap();
@@ -33,36 +33,51 @@ impl NetworkInterface {
         NetworkInterface { udp_socket }
     }
 
-    fn listen_for_packets(udp_socket: Arc<Mutex<UdpSocket>>, sender: Sender<Vec<u8>>) {
-        loop {
-            let mut buf = [0; 1500];
-            match udp_socket.lock().unwrap().recv_from(&mut buf) {
-                Ok((size, _)) => {
-                    let packet = buf[..size].to_vec();  // Create packet data from received buffer
-                    if let Err(e) = sender.send(packet) {
-                        eprintln!("Error sending packet to parent: {}", e);
-                        break;
+    fn listen_for_packets(udp_socket: Arc<Mutex<UdpSocket>>, sender: Sender<Packet>) {
+    loop {
+        let mut buf = [0; 1500];
+        match udp_socket.lock().unwrap().recv_from(&mut buf) {
+            Ok((size, _)) => {
+                let packet = buf[..size].to_vec();  // Create packet data from received buffer
+                match Packet::parse_ip_packet(&packet) {
+                    Ok(parsed_packet) => {
+                        if let Err(e) = sender.send(parsed_packet) {
+                            eprintln!("Error sending packet to parent: {}", e);
+                            break;
+                        }
+                        println!("Received packet of size {}", size);
                     }
-                    println!("Received packet of size {}", size);
+                    Err(e) => {
+                        eprintln!("Error parsing packet: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Error receiving packet: {}", e);
-                }
+            }
+            Err(e) => {
+                eprintln!("Error receiving packet: {}", e);
             }
         }
     }
+}
 
-    // pub fn send_data(&self, packet: Packet, )
-    // pub fn send_data(&self, destination_ip: Ipv4Addr, data: &[u8]) -> Result<(), std::io::Error> {
-    //     self.udp_socket.lock().send_to(data, 0, &format!("{}:0", destination_ip))?;
-    //     Ok(())
-    // }
+    pub fn send_packet(&self, packet: Packet, dest_port: u16) {
+        // Serialize the packet into a byte buffer (you may need to define this method)
+        let serialized_packet = packet.to_bytes();
 
-    // // TODO: implement this function to send up to the parent device
-    // pub fn send_to_parent(sender: Sender<()>) -> Result<(), std::io::Error> {   
-    //     sender.send()
-    //     Ok(())
-    // }
+        // Extract destination IP and port (this might be part of your packet structure)
+        let destination_ip = packet.dest_ip;
+
+        let destination_addr = SocketAddr::new(IpAddr::V4(destination_ip), dest_port);
+
+        // Lock the UDP socket and send the packet
+        match self.udp_socket.lock().unwrap().send_to(&serialized_packet, destination_addr) {
+            Ok(sent_bytes) => {
+                println!("Successfully sent {} bytes to {}.", sent_bytes, destination_addr);
+            }
+            Err(e) => {
+                eprintln!("Error sending packet: {}", e);
+            }
+        }
+    }
 }
 
 

@@ -27,7 +27,7 @@ pub struct InterfaceStruct {
 }
 
 impl InterfaceStruct {
-    pub fn new(config: InterfaceConfig, packet_sender: Sender<Vec<u8>> ) -> InterfaceStruct {
+    pub fn new(config: InterfaceConfig, packet_sender: Sender<packet::Packet> ) -> InterfaceStruct {
         return InterfaceStruct {
             interface: NetworkInterface::new(&config, packet_sender),
             config: config,

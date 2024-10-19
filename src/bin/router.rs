@@ -25,8 +25,8 @@ pub struct Router {
 
 impl Router {
     // TODO: intiialize the interface as part of the Host
-    pub fn new(ip_config: &IPConfig, packet_sender: Sender<Vec<u8>>) -> Router {
-        let mut routing_table = Table::new(ip_config);
+    pub fn new(ip_config: &IPConfig, packet_sender: Sender<Packet>) -> Router {
+        let routing_table = Table::new(ip_config);
         let mut ifstructs: Vec<InterfaceStruct> = Vec::new();
         for interface in ip_config.interfaces.clone() {
             ifstructs.push(InterfaceStruct::new(interface, packet_sender.clone()));
@@ -63,12 +63,12 @@ impl Router {
         }
     }
 
-    pub fn receive_from_interface(&mut self, receiver: Receiver<Vec<u8>>) {
+    pub fn receive_from_interface(&mut self, receiver: Receiver<Packet>) {
         loop {
             match receiver.recv() {
                 Ok(packet) => {
-                    todo!();
-                    // self.process_packet(&packet);
+                    // todo!();
+                    self.process_packet(packet);
                 }
                 Err(_) => break,
             }
@@ -176,51 +176,97 @@ impl Router {
     //     self.routing_table.lookup(destination)
     // }
 
-    pub fn forward_packet(&self, packet: &Packet, destination_ip: Ipv4Addr) -> Result<(), std::io::Error> {
-        // lookup the route for the destination IP
-        let interface = match self.routing_table.lookup(destination_ip) {
-            Some(interface) => interface,
-            None => {
-                // the packet should also be dropped, however that needs to be implemented
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("No route found for destination IP: {}", destination_ip),
-                ));
-            },
-        };
-
-        todo!();
-        // send the packet to the interface
-        //interface.send_data(destination_ip, packet)?;
-        Ok(())
-    }
-
-    // return error as well? 
-    pub fn handle_received_packet(&self, interface: &NetworkInterface, packet: Packet) {
-        let mut is_local = false;
-
-        // Iterate through all the interfaces to check if the packet is local
-        for iface in &self.interfaces {
-            if packet.is_local(iface.config.assigned_ip){
-                is_local = true;
-                break; 
+    // Forward a packet to the next hop (another router or destination)
+    pub fn forward_packet(&self, packet: Packet, mut next_hop: NextHop) {
+        loop {
+            match next_hop {
+                NextHop::Interface(interface) => {
+                    if let Some(matching_interface_struct) = self.find_interface_by_name(&interface.name) {
+                        // iterate through neighbors to find matching neighbor's interface's port
+                        if let Some(neighbor_port) = self.find_neighbor_port(&matching_interface_struct) {
+                        // Send the packet along with the neighbor's port number
+                        matching_interface_struct.interface.send_packet(packet, neighbor_port);
+                        return; // Exit after sending the packet
+                    } else {
+                        eprintln!("Error: Neighbor interface not found for: {}", interface.name);
+                        return; // Exit if no matching neighbor interface is found
+                    }
+                    } else {
+                        eprintln!("Error: Interface not found: {}", interface.name);
+                        return;
+                    }
+                }
+                NextHop::IPAddress(ip_addr) => {
+                    /*
+                        Logic behind this is that it should eventually terminate by finding
+                        a proper interface to send through. If it never does, then we error print.
+                     */
+                    match self.routing_table.lookup(ip_addr) {
+                        Some(new_route) => {
+                            next_hop = new_route.next_hop.clone();
+                        }
+                        None => {
+                            eprintln!("Error: No valid interface found for destination IP: {}", ip_addr);
+                            return;
+                        }
+                    }
+                }
             }
         }
+    }
 
-        if is_local {
+    pub fn process_packet(&mut self, packet: Packet) {
+        // check if the packet dest_ip matches any of the interfaces
+        if self.is_packet_for_router(&packet.dest_ip) {
             self.process_local_packet(packet);
         } else {
-            // forward the packet to destination
-            self.forward_packet(&packet, packet.dest_ip);
+            // packet is not meant for this router, so we need to forward it
+            match self.routing_table.lookup(packet.dest_ip) {
+                Some(route) => {
+                    self.forward_packet(packet, route.next_hop.clone());
+                }
+                None => {
+                    eprintln!("Error: No valid interface found for destination IP: {}", packet.dest_ip);
+                }
+            }
         }
     }
 
-    // process local packets
-    fn process_local_packet(&self, packet: Packet) {
-        todo!("do something with packet");
-        // println!("Received local packet from {}: {}", packet.src_ip, packet.data);
-        // TODO: do something with the packet
+    // Process packets meant for the router (like a host would do)
+    pub fn process_local_packet(&mut self, packet: Packet) {
+        println!("Router received a local packet: Src: {}, Dst: {}, TTL: {}, Data: {}", 
+            packet.src_ip, packet.dest_ip, packet.ttl, 
+            String::from_utf8(packet.payload).unwrap());
     }
+
+    // Helper to check if a packet is for a router (any of the router's interfaces)
+    fn is_packet_for_router(&self, dest_ip: &Ipv4Addr) -> bool {
+        for interface in &self.interfaces {
+            if interface.config.assigned_ip == *dest_ip {
+                return true; // This IP matches one of the router's interfaces
+            }
+        }
+        false
+    }
+
+    fn find_interface_by_name(&self, interface_name: &str) -> Option<&InterfaceStruct> {
+        self.interfaces.iter().find(|interface| interface.config.name == interface_name)
+    }
+    
+    // Helper function to find the port of the neighbor's interface
+    fn find_neighbor_port(&self, matching_interface_struct: &InterfaceStruct) -> Option<u16> {
+        let interface_ip = matching_interface_struct.config.assigned_ip; // This should be a field in your struct
+    
+        // Iterate through the neighbors to find the matching interface based on IP address
+        for neighbor in &self.neighbors {
+            // Check if the neighbor's IP matches the interface's IP
+            if neighbor.udp_addr == interface_ip {
+                return Some(neighbor.udp_port); // Return the port number if a match is found
+            }
+        }
+        None // Return None if no matching neighbor interface is found
+    }
+
 }
 
 fn main() {
@@ -232,7 +278,7 @@ fn main() {
     }
     // use the IPConfig and pass into `parse`, the return should be the updated IPConfig
     let lnx_file_path = &args[2];
-    let mut ip_config: IPConfig = match IPConfig::try_new(lnx_file_path.clone()) {
+    let ip_config: IPConfig = match IPConfig::try_new(lnx_file_path.clone()) {
         Ok(config) => config, 
         Err(e) => {
             eprintln!("Failed to parse the lnx file: {}", e);
@@ -240,7 +286,7 @@ fn main() {
         }
     };
     
-    let (packet_sender, packet_receiver) = mpsc::channel::<Vec<u8>>();
+    let (packet_sender, packet_receiver) = mpsc::channel::<Packet>();
 
     // get all necessary things and pass it into new
     let mut router = Router::new(&ip_config, packet_sender);

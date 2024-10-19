@@ -81,16 +81,31 @@ impl Packet {
         }
     }
 
-    // // Serialize the packet
-    // pub fn to_bytes(&self) -> Vec<u8> {
-    //     // Build the IP header and append payload
-    //     let mut ip_header = Ipv4Header::new(
-    //         (self.payload.len() + 20) as u16, 
-    //         self.ttl,
-    //         self.protocol,                    
-    //         self.src_ip.octets(),             
-    //         self.dest_ip.octets()             
-    //     );
+    // Serialize the packet
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // Create an IPv4 header using etherparse
+        let header = match Ipv4Header::new(
+            self.payload.len() as u16,
+            self.ttl,
+            Self::protocol_to_ipnumber(self.protocol),
+            self.src_ip.octets(),
+            self.dest_ip.octets(),
+        ) {
+            Ok(header) => header,
+            Err(err) => {
+                // Handle the error here, for example:
+                panic!("Failed to create Ipv4Header: {}", err);
+            }
+        };
+
+        let mut packet_bytes = Vec::new();
+        // Serialize the header to bytes
+        packet_bytes.extend_from_slice(&header.to_bytes());
+        // Append the actual payload
+        packet_bytes.extend_from_slice(&self.payload);
+
+        packet_bytes
+    }
         
     //     // Recompute checksum for the header
     //     ip_header.header_checksum = Packet::compute_checksum(&ip_header);
