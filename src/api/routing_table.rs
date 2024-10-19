@@ -80,8 +80,6 @@ impl Table {
         .insert(hash, route);
     }
 
-    let keys = Table::sort_keys(&routing_table);
-
     for static_route in &ip_config.static_routes {
       let prefix_len = static_route.0.prefix_len();
       let hash = Table::hash(&static_route.0.addr(), prefix_len);
@@ -99,6 +97,8 @@ impl Table {
         .insert(hash, route);
     }
 
+    let keys = Table::sort_keys(&routing_table);
+    
     Table { routing_table, keys }
   }
   
@@ -108,15 +108,15 @@ impl Table {
   // lookup something in the table
   pub fn lookup(&self, ip_addr: Ipv4Addr) -> Option<&Route> {
     for prefix in &self.keys {
-        let hash = Table::hash(&ip_addr, *prefix);
-        if let Some(ip_table) = self.routing_table.get(prefix) {
-            if let Some(interface) = ip_table.get(&hash) {
-                return Some(interface);
-            }
+      let hash = Table::hash(&ip_addr, *prefix);
+      if let Some(ip_table) = self.routing_table.get(prefix) {
+        if let Some(route) = ip_table.get(&hash) {
+          return Some(route);
         }
+      }
     }
     None
-  }
+}
 
   pub fn get_routes(&self) -> Vec<Route> {
     let mut routes: Vec<Route> = Vec::new();

@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "host"
-path = "src/bin/host.rs"
+name = "vhost"
+path = "src/bin/vhost.rs"
 
 [[bin]]
-name = "router"
-path = "src/bin/router.rs"
+name = "vrouter"
+path = "src/bin/vrouter.rs"
 
 [dependencies]
 etherparse = "0.16"

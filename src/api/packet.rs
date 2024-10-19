@@ -20,7 +20,7 @@ impl Packet {
         let builder = PacketBuilder::ipv4(
             src_ip.octets(),    // Source IP address
             dest_ip.octets(),   // Destination IP address
-            20                 // TTL (time to live)
+            16                 // TTL (time to live)
         );
 
         let mut result = Vec::<u8>::with_capacity(builder.size(payload.len()));
@@ -31,7 +31,7 @@ impl Packet {
             dest_ip,
             protocol,   // Custom protocol (0 for Test Protocol, 200 for RIP)
             payload: result,   // The raw byte representation of the payload
-            ttl: 20,           // TTL field (set to 20 here, can be changed)
+            ttl: 16,           // TTL field (set to 20 here, can be changed)
             header_checksum: 0, // You can set the checksum manually if needed
         }
     }

@@ -49,14 +49,6 @@ pub fn repl(sender: Sender<Command>) -> Result<()> {
                     _ => println!("Unknown command: {}", args[0]),
                 }
             }
-            Err(ReadlineError::Interrupted) => {
-                println!("CTRL-C detected, exiting...");
-                break;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("CTRL-D detected, exiting...");
-                break;
-            }
             Err(err) => {
                 println!("Error: {:?}", err);
                 break;

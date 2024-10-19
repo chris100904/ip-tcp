@@ -2,7 +2,7 @@ use std::env;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use ip_epa127::api::network_interface::{self, NetworkInterface};
 use ip_epa127::api::repl::repl;
 use ip_epa127::api::packet::Packet;
@@ -44,18 +44,23 @@ impl Router {
         }
     }
 
-    pub fn listen_for_commands(&mut self, receiver: Receiver<Command>) {
+    pub fn listen_for_commands(router: Arc<Mutex<Router>>, receiver: Receiver<Command>) {
         loop {
             match receiver.recv() {
                 Ok(command) => {
-                    match command {
-                        Command::ListInterfaces => self.list_interfaces(),
-                        Command::ListNeighbors => self.list_neighbors(),
-                        Command::ListRoutes => self.list_routes(),
-                        Command::DisableInterface(ifname) => self.disable_interface(&ifname),
-                        Command::EnableInterface(ifname) => self.enable_interface(&ifname),
-                        Command::SendTestPacket(addr, msg) => self.send_test_packet(&addr, &msg),
-                        Command::Exit => break,
+                    loop {
+                        if let Ok(mut safe_router) = router.try_lock() {
+                            match command {
+                                Command::ListInterfaces => safe_router.list_interfaces(),
+                                Command::ListNeighbors => safe_router.list_neighbors(),
+                                Command::ListRoutes => safe_router.list_routes(),
+                                Command::DisableInterface(ifname) => safe_router.disable_interface(&ifname),
+                                Command::EnableInterface(ifname) => safe_router.enable_interface(&ifname),
+                                Command::SendTestPacket(addr, msg) => safe_router.send_test_packet(&addr, &msg),
+                                Command::Exit => break,
+                            }
+                            break;
+                        }
                     }
                 }
                 Err(_) => break,
@@ -63,14 +68,20 @@ impl Router {
         }
     }
 
-    pub fn receive_from_interface(&mut self, receiver: Receiver<Packet>) {
+    pub fn receive_from_interface(router: Arc<Mutex<Router>>, receiver: Receiver<Packet>) {
         loop {
             match receiver.recv() {
                 Ok(packet) => {
                     // todo!();
-                    self.process_packet(packet);
+                    loop {
+                        if let Ok(mut safe_router) = router.try_lock() {
+                            // println!("HELLO");
+                            safe_router.process_packet(packet);
+                            break;
+                        }
+                    }
                 }
-                Err(_) => break,
+                Err(e) => eprintln!("ERROR!: {e}"),
             }
         }
     }
@@ -190,16 +201,17 @@ impl Router {
         loop {
             match next_hop {
                 NextHop::Interface(interface) => {
+                    println!("INTERFACE: {:?}", interface);
                     if let Some(matching_interface_struct) = self.find_interface_by_name(&interface.name) {
                         // iterate through neighbors to find matching neighbor's interface's port
-                        if let Some(neighbor_port) = self.find_neighbor_port(&matching_interface_struct) {
-                        // Send the packet along with the neighbor's port number
-                        matching_interface_struct.interface.send_packet(packet, neighbor_port);
-                        return; // Exit after sending the packet
-                    } else {
-                        eprintln!("Error: Neighbor interface not found for: {}", interface.name);
-                        return; // Exit if no matching neighbor interface is found
-                    }
+                        if let Some((neighbor_addr, neighbor_port)) = self.find_neighbor_socket(&matching_interface_struct) {
+                            // Send the packet along with the neighbor's port number
+                            matching_interface_struct.interface.send_packet(packet, neighbor_addr, neighbor_port);
+                            return; // Exit after sending the packet
+                        } else {
+                            eprintln!("Error: Neighbor interface not found for: {}", interface.name);
+                            return; // Exit if no matching neighbor interface is found
+                        }
                     } else {
                         eprintln!("Error: Interface not found: {}", interface.name);
                         return;
@@ -232,6 +244,7 @@ impl Router {
             // packet is not meant for this router, so we need to forward it
             match self.routing_table.lookup(packet.dest_ip) {
                 Some(route) => {
+                    println!("ROUTE: {:?}", route);
                     self.forward_packet(packet, route.next_hop.clone());
                 }
                 None => {
@@ -243,6 +256,7 @@ impl Router {
 
     // Process packets meant for the router (like a host would do)
     pub fn process_local_packet(&mut self, packet: Packet) {
+        println!("payload: {:?}", packet.payload);
         println!("Router received a local packet: Src: {}, Dst: {}, TTL: {}, Data: {}", 
             packet.src_ip, packet.dest_ip, packet.ttl, 
             String::from_utf8(packet.payload).unwrap());
@@ -263,14 +277,14 @@ impl Router {
     }
     
     // Helper function to find the port of the neighbor's interface
-    fn find_neighbor_port(&self, matching_interface_struct: &InterfaceStruct) -> Option<u16> {
-        let interface_ip = matching_interface_struct.config.assigned_ip; // This should be a field in your struct
+    fn find_neighbor_socket(&self, matching_interface_struct: &InterfaceStruct) -> Option<(Ipv4Addr, u16)> {
+        let interface_name = matching_interface_struct.config.name.clone(); // This should be a field in your struct
     
         // Iterate through the neighbors to find the matching interface based on IP address
         for neighbor in &self.neighbors {
             // Check if the neighbor's IP matches the interface's IP
-            if neighbor.udp_addr == interface_ip {
-                return Some(neighbor.udp_port); // Return the port number if a match is found
+            if neighbor.interface_name == interface_name {
+                return Some((neighbor.udp_addr, neighbor.udp_port)); // Return the port number if a match is found
             }
         }
         None // Return None if no matching neighbor interface is found
@@ -298,7 +312,7 @@ fn main() {
     let (packet_sender, packet_receiver) = mpsc::channel::<Packet>();
 
     // get all necessary things and pass it into new
-    let mut router = Router::new(&ip_config, packet_sender);
+    let router = Arc::new(Mutex::new(Router::new(&ip_config, packet_sender)));
 
     // Create a channel for communication between the REPL and the Host
     let (tx, rx) = mpsc::channel();
@@ -309,7 +323,10 @@ fn main() {
     });
 
     // The Host listens for commands from the REPL
-    router.listen_for_commands(rx);
-
-    router.receive_from_interface(packet_receiver);
+    let router_clone = Arc::clone(&router);
+    std::thread::spawn(move ||{
+        Router::listen_for_commands(router_clone, rx);
+    });
+    
+    Router::receive_from_interface(router, packet_receiver);
 }

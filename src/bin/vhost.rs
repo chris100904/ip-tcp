@@ -28,7 +28,7 @@ impl Host {
         let interface = InterfaceStruct {
             config: ip_config.interfaces[0].clone(),
             enabled: true,
-            interface: NetworkInterface::new(&ip_config.interfaces[0], packet_sender.clone()),
+            interface: NetworkInterface::new(&ip_config.interfaces[0], packet_sender),
         };
 
         Host {
@@ -149,7 +149,8 @@ impl Host {
                         // need to get the port # of the next interface? 
                         if let Some(neighbor) = self.neighbors.iter().find(|n| n.interface_name == interface.name) {
                             let udp_port = neighbor.udp_port;
-                            self.interface.interface.send_packet(packet, udp_port);
+                            let udp_addr = neighbor.udp_addr;
+                            self.interface.interface.send_packet(packet, udp_addr, udp_port);
                             println!("Sent {} bytes to interface {} via port {}", data.len(), interface.name, udp_port);
                         } else {
                             eprintln!("Error: No neighbor found for interface {}", interface.name);
@@ -160,7 +161,8 @@ impl Host {
                         // Assuming you may need to send to another host or router, look up the port
                         if let Some(neighbor) = self.neighbors.iter().find(|n| n.dest_addr == *ip_addr) {
                             let udp_port = neighbor.udp_port;
-                            self.interface.interface.send_packet(packet, udp_port);
+                            let udp_addr = neighbor.udp_addr;
+                            self.interface.interface.send_packet(packet, udp_addr, udp_port);
                             println!("Sent {} bytes to IP {} via port {}", data.len(), ip_addr, udp_port);
                         } else {
                             eprintln!("Error: No neighbor found for IP {}", ip_addr);
@@ -179,7 +181,8 @@ impl Host {
         if let Some(neighbor) = self.neighbors.iter().find(|n| n.dest_addr == packet.src_ip) {
             // Send the packet to the UDP port of the neighbor
             let udp_port = neighbor.udp_port;
-            self.interface.interface.send_packet(packet, udp_port);
+            let udp_addr = neighbor.udp_addr;
+            self.interface.interface.send_packet(packet, udp_addr, udp_port);
         } else {
             eprintln!("No neighbor found for source IP: {}", packet.src_ip);
         }
