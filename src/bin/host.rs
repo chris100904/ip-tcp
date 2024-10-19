@@ -127,57 +127,63 @@ impl Host {
         }
     }
 
-    pub fn send_test_packet(&self, addr: &str, message: &str) {
+    pub fn send_test_packet(&mut self, addr: &str, message: &str) {
         let dest_ip = Ipv4Addr::from_str(addr).unwrap();
         let data = message.as_bytes();
         let packet = Packet::new(self.interface.config.assigned_ip, dest_ip, 0, data.to_vec());
-        
-        match self.forwarding_table.lookup(dest_ip) {
-            Some(interface) => {
-                
-                // interface.send_data(packet).unwrap();
-                todo!();
 
-                println!("Sent {} bytes", data.len());
+        // Check if the destination is the host itself (local communication)
+        if dest_ip == self.interface.config.assigned_ip {
+            println!("Destination is local, processing locally.");
+            self.process_local_packet(packet); // Process the packet directly
+            return;
+        }
+
+        // Check the routing table
+        match self.forwarding_table.lookup(dest_ip) {
+            Some(route) => {
+                // Send the packet based on the route's next hop (this might be the default route)
+                match &route.next_hop {
+                    NextHop::Interface(interface) => {
+                        println!("Sending packet to interface {}", interface.name);
+                        // need to get the port # of the next interface? 
+                        if let Some(neighbor) = self.neighbors.iter().find(|n| n.interface_name == interface.name) {
+                            let udp_port = neighbor.udp_port;
+                            self.interface.interface.send_packet(packet, udp_port);
+                            println!("Sent {} bytes to interface {} via port {}", data.len(), interface.name, udp_port);
+                        } else {
+                            eprintln!("Error: No neighbor found for interface {}", interface.name);
+                        }
+                    }
+                    NextHop::IPAddress(ip_addr) => {
+                        println!("Sending packet to IP address {}", ip_addr);
+                        // Assuming you may need to send to another host or router, look up the port
+                        if let Some(neighbor) = self.neighbors.iter().find(|n| n.dest_addr == *ip_addr) {
+                            let udp_port = neighbor.udp_port;
+                            self.interface.interface.send_packet(packet, udp_port);
+                            println!("Sent {} bytes to IP {} via port {}", data.len(), ip_addr, udp_port);
+                        } else {
+                            eprintln!("Error: No neighbor found for IP {}", ip_addr);
+                        }
+                    }
+                }
             }
             None => {
-                eprintln!("Error: No valid interface found for destination IP: {}", dest_ip);
+                // If no specific route is found, the default route should be used
+                eprintln!("Error: No valid route found for destination IP: {}", dest_ip);
             }
         }
     }
 
-    // // TODO: Probably delete this
-    // pub fn receive_packet(&mut self) {
-    //     let mut buf = [0; 1500];
-    //     match self.socket.recv_from(&mut buf) {
-    //         Ok((size, _)) => {
-    //             self.process_packet(&buf[..size]);
-    //         }
-    //         Err(e) => {
-    //             eprintln!("Error receiving packet: {}", e);
-    //         }
-    //     }
-    // }
-
-    // // TODO: IP FORWARDING
-    // pub fn process_local_packet(&mut self, packet: Packet) {
-    //     if let Some(neighbor) = self.neighbors.iter().find(|n| n.dest_addr == packet.src_ip) {
-    //         // Send the packet to the UDP port of the neighbor
-    //         let udp_addr = neighbor.udp_addr;
-    //         let udp_port = neighbor.udp_port;
-
-    //         todo!();
-    //         // Assuming you have a method to send data to a specific UDP address
-    //         // let result = self.interface.interface.send_data(udp_addr, packet.to_bytes());
-
-    //         // match result {
-    //         //     Ok(_) => println!("Sent packet to {}:{}", udp_addr, udp_port),
-    //         //     Err(e) => eprintln!("Failed to send packet: {}", e),
-    //         // }
-    //     } else {
-    //         eprintln!("No neighbor found for source IP: {}", packet.src_ip);
-    //     }
-    // }
+    pub fn process_local_packet(&mut self, packet: Packet) {
+        if let Some(neighbor) = self.neighbors.iter().find(|n| n.dest_addr == packet.src_ip) {
+            // Send the packet to the UDP port of the neighbor
+            let udp_port = neighbor.udp_port;
+            self.interface.interface.send_packet(packet, udp_port);
+        } else {
+            eprintln!("No neighbor found for source IP: {}", packet.src_ip);
+        }
+    }
 
     /* If a Host receives a packet, that means that the packet has reached a destination. 
        Hosts are endpoints in the network, so we can just terminate and print here. */

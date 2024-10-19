@@ -145,17 +145,6 @@ impl Router {
         }
     }
 
-    pub fn send_test_packet(&self, addr: &str, message: &str) {
-        let dest_ip = Ipv4Addr::from_str(addr).unwrap();
-        let data = message.as_bytes();
-        // let packet = Packet::new(self.ip_addr, dest_ip, 17, data.to_vec());
-
-        // self.forward_packet(&packet, dest_ip).unwrap();
-        // self.socket.send_to(&packet.to_bytes(), 0).unwrap();
-
-        todo!()
-    }
-
     pub fn add_interface(&mut self, interface: NetworkInterface) {
         todo!()
     }
@@ -175,6 +164,26 @@ impl Router {
     // pub fn lookup_route(&self, destination: Ipv4Addr) -> Option<NetworkInterface> {
     //     self.routing_table.lookup(destination)
     // }
+
+    pub fn send_test_packet(& mut self, addr: &str, message: &str) {
+        let dest_ip = Ipv4Addr::from_str(addr).unwrap();
+        let data = message.as_bytes();
+        // the source ip is assumed to be one of the interfaces assigned ips? 
+        let packet = Packet::new(self.interfaces[0].config.assigned_ip, dest_ip, 0, data.to_vec());
+
+        if self.is_packet_for_router(&dest_ip) {
+            self.process_local_packet(packet);
+        } else {
+            match self.routing_table.lookup(dest_ip) {
+                Some(route) => {
+                    self.forward_packet(packet, route.next_hop.clone()); // Forward the packet using forward_packet logic
+                }
+                None => {
+                    eprintln!("Error: No valid route found for destination IP: {}", dest_ip);
+                }
+            }
+        }
+    }
 
     // Forward a packet to the next hop (another router or destination)
     pub fn forward_packet(&self, packet: Packet, mut next_hop: NextHop) {
