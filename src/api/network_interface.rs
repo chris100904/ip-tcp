@@ -12,11 +12,6 @@ pub struct NetworkInterface {
     udp_socket: Arc<Mutex<UdpSocket>>,
 }
 
-pub trait Device {
-    fn send_data(&self, destination_ip: Ipv4Addr, data: &[u8]) -> Result<(), std::io::Error>;
-    fn receive_packet(&mut self) -> Result<Vec<u8>, std::io::Error>;
-}
-
 impl NetworkInterface {
     pub fn new(ip_config: &InterfaceConfig, packet_sender: Sender<Packet>) -> NetworkInterface {
         let udp_addr = ip_config.udp_addr;
