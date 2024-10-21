@@ -32,6 +32,7 @@ impl NetworkInterface {
     fn listen_for_packets(udp_socket: Arc<Mutex<UdpSocket>>, udp_addr: Ipv4Addr,  sender: Sender<(Packet, Ipv4Addr)>) {
         loop {
             let mut buf = [0; MAX_PACKET_SIZE];
+            thread::sleep(std::time::Duration::from_millis(100)); // Sleep for a short duration to avoid busy looping
             match udp_socket.lock().unwrap().recv_from(&mut buf) {
                 Ok((size, _)) => {
                     let packet = buf[..size].to_vec();  // Create packet data from received buffer
@@ -50,7 +51,6 @@ impl NetworkInterface {
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // Non-blocking mode, so we just continue looping without holding the lock for too long
-                    thread::sleep(std::time::Duration::from_millis(10)); // Sleep for a short duration to avoid busy looping
                     continue;
                 }
                 Err(e) => {
@@ -66,7 +66,7 @@ impl NetworkInterface {
         // Extract destination IP and port (this might be part of your packet structure)
 
         let destination_addr = SocketAddr::new(IpAddr::V4(udp_addr), dest_port);
-
+        
         // Lock the UDP socket and send the packet
         match self.udp_socket.lock().unwrap().send_to(&serialized_packet, destination_addr) {
             Ok(sent_bytes) => {

@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, thread};
 use std::net::Ipv4Addr;
 use std::sync::{mpsc, Arc, Mutex};
 use ip_epa127::api::device::Device;
@@ -38,12 +38,16 @@ fn main() {
 
     // The Host listens for commands from the REPL
     let router_clone = Arc::clone(&router);
-    std::thread::spawn(move ||{
+    thread::spawn(move ||{
         Device::listen_for_commands(router_clone, rx);
     });
     // send a rip request to all neighbors at the start
 
     // start the periodic updates
-    Device::start_periodic_updates(Arc::clone(&device));
+    let router_clone_2 = Arc::clone(&router);
+    thread::spawn(move || { 
+      Device::start_periodic_updates(Arc::clone(&router_clone_2));
+    });
+    
     Device::receive_from_interface(router, packet_receiver);
 }

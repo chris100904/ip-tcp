@@ -96,29 +96,29 @@ impl Device {
   }
 
   pub fn receive_from_interface(device: Arc<Mutex<Device>>, receiver: Receiver<(Packet, Ipv4Addr)>) {
-      loop {
-          match receiver.recv() {
-              Ok((packet, src_ip)) => { 
-                  loop {
-                      if let Ok(mut safe_device) = device.try_lock() {
-                          for interface in &safe_device.interfaces {
-                              if interface.config.udp_addr == src_ip {
-                                  if interface.enabled {
-                                      safe_device.process_packet(packet); // Process the packet
-                                      break;
-                                  }
-                              }
-                          }
-                      } else {
-                          // If the interface is disabled, you can log or handle it accordingly
-                          eprintln!("Interface {} is disabled, packet dropped.", src_ip);
-                      }
-                      break;
+    loop {
+      match receiver.recv() {
+        Ok((packet, src_ip)) => { 
+          loop {
+            if let Ok(mut safe_device) = device.try_lock() {
+              for interface in &safe_device.interfaces {
+                if interface.config.udp_addr == src_ip {
+                  if interface.enabled {
+                    safe_device.process_packet(packet); // Process the packet
+                    break;
                   }
-              } 
-              Err(e) => eprintln!("ERROR!: {e}"),
+                }
+              }
+            } else {
+                // If the interface is disabled, you can log or handle it accordingly
+                eprintln!("Interface {} is disabled, packet dropped.", src_ip);
+            }
+            break;
           }
+        } 
+        Err(e) => eprintln!("ERROR!: {e}"),
       }
+    }
   }
 
 
@@ -149,7 +149,7 @@ impl Device {
       }
   }
 
-  pub fn list_routes(&self) {
+  pub fn list_routes(&mut self) {
       println!("T       Prefix   Next hop   Cost");
       for route in &self.routing_table.get_routes() {
           let routing_type = match route.routing_mode {
@@ -214,66 +214,64 @@ impl Device {
 
   // Forward a packet to the next hop (another router or destination)
   pub fn forward_packet(&self, packet: Packet, mut next_hop: NextHop) {
-      loop {
-          match next_hop {
-              NextHop::Interface(interface) => {
-                  // println!("INTERFACE: {:?}", interface);
-                  if let Some(matching_interface_struct) = self.find_interface_by_name(&interface.name) {
-                      // iterate through neighbors to find matching neighbor's interface's port
-                      if let Some((neighbor_addr, neighbor_port)) = self.find_neighbor_socket(&matching_interface_struct) {
-                          // Send the packet along with the neighbor's port number
-                          matching_interface_struct.interface.send_packet(packet, neighbor_addr, neighbor_port);
-                          return; // Exit after sending the packet
-                      } else {
-                          eprintln!("Error: Neighbor interface not found for: {}", interface.name);
-                          return; // Exit if no matching neighbor interface is found
-                      }
-                  } else {
-                      eprintln!("Error: Interface not found: {}", interface.name);
-                      return;
-                  }
-              }
-              NextHop::IPAddress(ip_addr) => {
-                  /*
-                      Logic behind this is that it should eventually terminate by finding
-                      a proper interface to send through. If it never does, then we error print.
-                   */
-                  match self.routing_table.lookup(ip_addr) {
-                      Some(new_route) => {
-                          next_hop = new_route.next_hop.clone();
-                      }
-                      None => {
-                          eprintln!("Error: No valid interface found for destination IP: {}", ip_addr);
-                          return;
-                      }
-                  }
-              }
+    loop {
+      match next_hop {
+        NextHop::Interface(interface) => {
+          // println!("INTERFACE: {:?}", interface);
+          if let Some(matching_interface_struct) = self.find_interface_by_name(&interface.name) {
+            // iterate through neighbors to find matching neighbor's interface's port
+            if let Some((neighbor_addr, neighbor_port)) = self.find_neighbor_socket(&matching_interface_struct) {
+              // Send the packet along with the neighbor's port number
+              matching_interface_struct.interface.send_packet(packet, neighbor_addr, neighbor_port);
+              return; // Exit after sending the packet
+            } else {
+              eprintln!("Error: Neighbor interface not found for: {}", interface.name);
+              return; // Exit if no matching neighbor interface is found
+            }
+          } else {
+            eprintln!("Error: Interface not found: {}", interface.name);
+            return;
           }
+        }
+          NextHop::IPAddress(ip_addr) => {
+          /*
+              Logic behind this is that it should eventually terminate by finding
+              a proper interface to send through. If it never does, then we error print.
+            */
+          match self.routing_table.lookup(ip_addr) {
+            Some(new_route) => {
+                next_hop = new_route.next_hop.clone();
+            }
+            None => {
+                eprintln!("Error: No valid interface found for destination IP: {}", ip_addr);
+                return;
+            }
+          }
+        }
       }
+    }
   }
 
   pub fn start_periodic_updates(device: Arc<Mutex<Device>>) {
-    thread::spawn(move || {
-      let interval = Duration::from_secs(5); // 5 seconds interval
-      let mut last_update = Instant::now();
+    let interval = Duration::from_secs(5); // 5 seconds interval
+    let mut last_update = Instant::now();
 
-      loop {
-        if last_update.elapsed() >= interval {
-          // Lock the device to access routing table
-          let device_clone = Arc::clone(&device);
-
-          if let Ok(mut device) = device_clone.lock() {
+    loop {
+      if last_update.elapsed() >= interval {
+        // Lock the device to access routing table
+        loop {
+          if let Ok(mut device) = device.try_lock() {
             // treat it like a rip request without any source of the request
             device.process_rip_request();
+            break;
           }
-
-          last_update = Instant::now(); // Reset the timer
         }
-
-        // Sleep for a short while to avoid busy looping
-        thread::sleep(interval);
+        last_update = Instant::now(); // Reset the timer
       }
-    });
+
+      // Sleep for a short while to avoid busy looping
+      thread::sleep(interval);
+    }
   }
 
   pub fn process_rip_packet(&mut self, packet: Packet) {
@@ -300,25 +298,27 @@ impl Device {
     // create the payload with the route information for interfaces that are enabled
     let mut entries: Vec<Entry> = Vec::new();
     for route in self.routing_table.get_routes(){
-        /* 
-            check if route has expired or cost is >= 16, then send RIP accordingly
-
-         */
+      // check if route has expired or cost is >= 16, then send RIP accordingly
+      if route.routing_mode == RoutingType::Rip {
         if route.cost.unwrap() >= 16 {
+          let cost: u32 = route.cost.unwrap().into();
+          let address = route.prefix.addr().to_bits();
+          let mask = route.prefix.netmask().to_bits();
             let entry = Entry {
-                cost: route.cost.unwrap().into(), 
-                address: route.prefix.addr().to_bits(), 
-                mask: route.prefix.netmask().to_bits(),
+                cost: cost.clone(), 
+                address: address.clone(), 
+                mask: mask.clone(),
             };
             let rip_packet = RipPacket::new(2, 1, vec![entry]);
             self.send_rip_to_neighbors(rip_packet);
-            self.routing_table.remove_route(entry.address, entry.mask);
-        } else if let NextHop::Interface(interface) = route.next_hop{
-        if let Some(cost) = route.cost {
-          entries.push(Entry { 
-            cost: cost.into(), 
-            address: interface.assigned_ip.to_bits(), 
-            mask: interface.assigned_prefix.netmask().to_bits() })
+            self.routing_table.remove_route(address, mask);
+        } else if let NextHop::Interface(interface) = route.next_hop {
+          if let Some(cost) = route.cost {
+            entries.push(Entry { 
+              cost: cost.into(), 
+              address: interface.assigned_ip.to_bits(), 
+              mask: interface.assigned_prefix.netmask().to_bits() })
+          }
         }
       }
     }
@@ -354,7 +354,7 @@ impl Device {
         if let Some(updated_route) = self.routing_table.update_route(src_ip, entry) {
             // Create the RIP entry based on the updated route
             let entry = Entry {
-                cost: updated_route.cost.unwrap.into(),  
+                cost: updated_route.cost.unwrap().into(),  
                 address: updated_route.prefix.addr().to_bits(),
                 mask: updated_route.prefix.netmask().to_bits(),
             };

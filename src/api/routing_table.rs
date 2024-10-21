@@ -94,6 +94,7 @@ impl Table {
         prefix: static_route.0,
         next_hop: NextHop::IPAddress(static_route.1),
         cost: None,
+        last_updated: Instant::now(),
       };
 
       routing_table
@@ -123,12 +124,14 @@ impl Table {
     None
   }
 
-  pub fn get_routes(&self) -> Vec<Route> {
+  pub fn get_routes(&mut self) -> Vec<Route> {
     let mut routes: Vec<Route> = Vec::new();
-    for prefix in self.routing_table.keys() {
-      if let Some(route_map) = self.routing_table.get(prefix) {
-        for hash in route_map.keys() {
-          if let Some(route) = route_map.get(hash) {
+    let prefixes: Vec<u8> = self.routing_table.keys().cloned().collect();
+    for prefix in prefixes {
+      if let Some(route_map) = self.routing_table.get_mut(&prefix) {
+        let hashes: Vec<u32> = route_map.keys().cloned().collect();
+        for hash in hashes {
+          if let Some(route) = route_map.get_mut(&hash) {
             let now = Instant::now();
             let expiration_time = Duration::from_secs(12);
             if now.duration_since(route.last_updated) > expiration_time {
