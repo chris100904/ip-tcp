@@ -41,6 +41,9 @@ fn main() {
     std::thread::spawn(move ||{
         Device::listen_for_commands(router_clone, rx);
     });
-    
+    // send a rip request to all neighbors at the start
+
+    // start the periodic updates
+    Device::start_periodic_updates(Arc::clone(&device));
     Device::receive_from_interface(router, packet_receiver);
 }

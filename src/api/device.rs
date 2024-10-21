@@ -1,7 +1,10 @@
+use std::f32::consts::E;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 use super::network_interface::NetworkInterface;
 use super::packet::{self, Entry, Packet, RipPacket};
 use super::routing_table::{NextHop, Route, Table};
@@ -249,11 +252,36 @@ impl Device {
       }
   }
 
+  pub fn start_periodic_updates(device: Arc<Mutex<Device>>) {
+    thread::spawn(move || {
+      let interval = Duration::from_secs(5); // 5 seconds interval
+      let mut last_update = Instant::now();
+
+      loop {
+        if last_update.elapsed() >= interval {
+          // Lock the device to access routing table
+          let device_clone = Arc::clone(&device);
+
+          if let Ok(mut device) = device_clone.lock() {
+            // treat it like a rip request without any source of the request
+            device.process_rip_request();
+          }
+
+          last_update = Instant::now(); // Reset the timer
+        }
+
+        // Sleep for a short while to avoid busy looping
+        thread::sleep(interval);
+      }
+    });
+  }
+
   pub fn process_rip_packet(&mut self, packet: Packet) {
     let rip_message = packet.parse_rip_message();
     match rip_message {
       Ok(rip_packet) => {
         match rip_packet.command {
+            // only send out to the person who requested
           1 => self.process_rip_request(),
           2 => self.process_rip_response(packet.src_ip, rip_packet.entries),
           _ => {
@@ -272,7 +300,20 @@ impl Device {
     // create the payload with the route information for interfaces that are enabled
     let mut entries: Vec<Entry> = Vec::new();
     for route in self.routing_table.get_routes(){
-      if let NextHop::Interface(interface) = route.next_hop{
+        /* 
+            check if route has expired or cost is >= 16, then send RIP accordingly
+
+         */
+        if route.cost.unwrap() >= 16 {
+            let entry = Entry {
+                cost: route.cost.unwrap().into(), 
+                address: route.prefix.addr().to_bits(), 
+                mask: route.prefix.netmask().to_bits(),
+            };
+            let rip_packet = RipPacket::new(2, 1, vec![entry]);
+            self.send_rip_to_neighbors(rip_packet);
+            self.routing_table.remove_route(entry.address, entry.mask);
+        } else if let NextHop::Interface(interface) = route.next_hop{
         if let Some(cost) = route.cost {
           entries.push(Entry { 
             cost: cost.into(), 
@@ -282,36 +323,56 @@ impl Device {
       }
     }
     let rip_packet = RipPacket::new(2, entries.len() as u16, entries);
-    
+    self.send_rip_to_neighbors(rip_packet);
+  }
+  
+  pub fn send_rip_to_neighbors(&mut self, rip_packet: RipPacket) {
     if let Some(rip_neighbors) = &self.rip_neighbors {
-      for rip_neighbor_ip in rip_neighbors {
-        for neighbor in &self.neighbors {
-            if neighbor.dest_addr == *rip_neighbor_ip { 
-                // CREATE NEW PACKET WITH THAT PAYLOAD AND EACH NEIGHBOR DEST_IP FOR HEADER
-                // specify the packet destination (header)
-                if let Some(next_route) = self.routing_table.lookup(neighbor.dest_addr) {
-                  let packet = Packet::new(self.interfaces[0].config.assigned_ip,
-                     *rip_neighbor_ip, 200, rip_packet.serialize_rip());
-                  self.forward_packet(packet, next_route.next_hop.clone());
+        for rip_neighbor_ip in rip_neighbors {
+            for neighbor in &self.neighbors {
+                if neighbor.dest_addr == *rip_neighbor_ip { 
+                    // CREATE NEW PACKET WITH THAT PAYLOAD AND EACH NEIGHBOR DEST_IP FOR HEADER
+                    // specify the packet destination (header)
+                    if let Some(next_route) = self.routing_table.lookup(neighbor.dest_addr) {
+                      let packet = Packet::new(self.interfaces[0].config.assigned_ip,
+                         *rip_neighbor_ip, 200, rip_packet.serialize_rip());
+                      self.forward_packet(packet, next_route.next_hop.clone());
+                    }
                 }
             }
         }
-      }
     }
   }
-  
+
   pub fn process_rip_response(&mut self, src_ip: Ipv4Addr, entries: Vec<Entry>) {
+    // send out rip all at the end with whatever needs to be sent
     for entry in entries {
-        if entry.cost < 16 { // Valid route (cost < 16)
-            // Update the routing table
-            self.routing_table.update_route(src_ip, entry);
-        } else {
-            // Handle invalid route (cost = 16)
-            self.routing_table.remove_route(entry.address, entry.mask);
-            // send a triggered update
+        let cost = entry.cost;
+        let is_invalid = cost >= 16;
+        
+        // Update the routing table regardless of valid or invalid route
+        if let Some(updated_route) = self.routing_table.update_route(src_ip, entry) {
+            // Create the RIP entry based on the updated route
+            let entry = Entry {
+                cost: updated_route.cost.unwrap.into(),  
+                address: updated_route.prefix.addr().to_bits(),
+                mask: updated_route.prefix.netmask().to_bits(),
+            };
+            
+            let rip_packet = RipPacket::new(2, 1, vec![entry]);
+            
+            // Send the RIP packet to all neighbors
+            self.send_rip_to_neighbors(rip_packet);
+            
+            // If it's an invalid route, remove it from the table
+            // invalid? but might be an issue
+            if is_invalid {
+                panic!("something bad happened");
+                self.routing_table.remove_route(entry.address, entry.mask);
+            }
         }
     }
-  }
+}
 
   pub fn process_packet(&mut self, packet: Packet) {
       // check if the packet dest_ip matches any of the interfaces

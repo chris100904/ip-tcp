@@ -1,5 +1,6 @@
 use std::{collections::HashMap, net::Ipv4Addr};
 use ipnet::{IpNet, Ipv4Net};
+use std::time::{Duration, Instant};
 
 use super::{packet::Entry, parser::{IPConfig, InterfaceConfig, RoutingType}};
 
@@ -24,6 +25,7 @@ pub struct Route {
   pub prefix: Ipv4Net,
   pub next_hop: NextHop,
   pub cost: Option<u8>,
+  pub last_updated: Instant,
 }
 
 impl Route {
@@ -32,7 +34,8 @@ impl Route {
       routing_mode: self.routing_mode.clone(),
       prefix: self.prefix.clone(),
       next_hop: self.next_hop.clone(),
-      cost: self.cost.clone()
+      cost: self.cost.clone(),
+      last_updated: Instant::now()
     }
   }
 }
@@ -73,6 +76,7 @@ impl Table {
         prefix: interface.assigned_prefix,
         next_hop: NextHop::Interface(interface.clone()),
         cost: Some(0),
+        last_updated: Instant::now(),
       };
 
       routing_table
@@ -125,6 +129,12 @@ impl Table {
       if let Some(route_map) = self.routing_table.get(prefix) {
         for hash in route_map.keys() {
           if let Some(route) = route_map.get(hash) {
+            let now = Instant::now();
+            let expiration_time = Duration::from_secs(12);
+            if now.duration_since(route.last_updated) > expiration_time {
+              // Route has expired, set its cost to infinity (16)
+              route.cost = Some(16);
+            }
             routes.push(route.clone());
           }
         }
@@ -132,6 +142,30 @@ impl Table {
     }
     return routes;
   }
+
+  // // check if anything has expired
+  // pub fn get_expired_routes(&mut self) -> Vec<u32>{
+  //       let expiration_time = Duration::from_secs(12); // 12 seconds expiration time
+  //       let now = Instant::now();
+  //       let mut expired_routes = Vec::new();
+  //       // Iterate over all routes and check for expiration
+  //       for (prefix_len, route_map) in self.routing_table.iter_mut() {
+  //           for (hash, route) in route_map {
+  //               if now.duration_since(route.last_updated) > expiration_time {
+  //                   // Route has expired, set its cost to infinity (16)
+  //                   route.cost = Some(16);
+  //                   expired_routes.push(*hash); // Mark route for removal after RIP update
+                    
+  //               }
+  //           }
+
+  //           // // Optionally remove expired routes or handle them accordingly (e.g., trigger RIP update)
+  //           // for hash in expired_routes {
+  //           //     route_map.remove(&hash);
+  //           // }
+  //       }
+  //       return expired_routes;
+  //   }
 
   // Function to determine if a route should be advertised based on Split Horizon
   pub fn should_advertise(&self, route: &Route, source: &NextHop) -> bool {
@@ -180,7 +214,7 @@ impl Table {
     None
   }
 
-  pub fn update_route(&mut self, src_ip: Ipv4Addr, entry: Entry) {
+  pub fn update_route(&mut self, src_ip: Ipv4Addr, entry: Entry) -> Option<&Route> {
     let ip = Ipv4Addr::from(entry.address);
     let prefix_len: u8 = entry.mask.count_ones().try_into().unwrap();
     let hash = Table::hash(&ip, prefix_len);
@@ -192,6 +226,7 @@ impl Table {
       prefix, 
       next_hop: NextHop::IPAddress(src_ip), 
       cost: Some(cost + 1),
+      last_updated: Instant::now(),
     };
     
     // Check if the route exists in the table
@@ -200,14 +235,17 @@ impl Table {
             // If the route exists, compare the cost
             if let Some(existing_cost) = existing_route.cost {
               if let Ok(new_cost) = u8::try_from(entry.cost) {
-                if new_cost + 1 < existing_cost {
+                if new_cost + 1 <= existing_cost {
                   route_map.get_mut(&hash).replace(&mut route);
+                } else {
+                  return None;
                 }
               }
             }
         } else {
           if !self.should_advertise(&route, &NextHop::IPAddress(src_ip)) {
             // If Split Horizon applies, USE COST OF INFINITY  
+            route.cost = Some(16);
           }
           self.add_route(entry.address, entry.mask, route);
         }
@@ -217,5 +255,6 @@ impl Table {
     }
     // Update keys after adding a new route
     self.keys = Table::sort_keys(&self.routing_table);
+    return Some(&self.routing_table.get(&prefix_len).unwrap().get(&hash).unwrap());
   }
 }
