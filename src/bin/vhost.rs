@@ -1,3 +1,4 @@
+use std::net::Ipv4Addr;
 use ip_epa127::api::device::Device;
 use ip_epa127::api::parser::IPConfig;
 use ip_epa127::api::repl::repl;
@@ -19,7 +20,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let (packet_sender, packet_receiver) = mpsc::channel::<Packet>();
+    let (packet_sender, packet_receiver) = mpsc::channel::<(Packet, Ipv4Addr)>();
 
     let host = Arc::new(Mutex::new(Device::new(&ip_config, packet_sender)));
 

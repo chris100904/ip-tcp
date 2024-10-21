@@ -1,4 +1,5 @@
 use std::env;
+use std::net::Ipv4Addr;
 use std::sync::{mpsc, Arc, Mutex};
 use ip_epa127::api::device::Device;
 use ip_epa127::api::repl::repl;
@@ -22,7 +23,7 @@ fn main() {
         }
     };
     
-    let (packet_sender, packet_receiver) = mpsc::channel::<Packet>();
+    let (packet_sender, packet_receiver) = mpsc::channel::<(Packet, Ipv4Addr)>();
 
     // get all necessary things and pass it into new
     let router = Arc::new(Mutex::new(Device::new(&ip_config, packet_sender)));

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::Ipv4Addr};
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
 
-use super::parser::{IPConfig, InterfaceConfig, RoutingType};
+use super::{packet::Entry, parser::{IPConfig, InterfaceConfig, RoutingType}};
 
 #[derive(Debug, Clone)]
 pub enum NextHop {
@@ -40,6 +40,7 @@ impl Route {
 
 #[derive(Debug)]
 pub struct Table {
+  // Prefix_len -> Hashed-IP (after mask) -> Route
   pub routing_table: HashMap<u8, HashMap<u32, Route>>,
   pub keys: Vec<u8>,
 }
@@ -72,7 +73,7 @@ impl Table {
         prefix: interface.assigned_prefix,
         next_hop: NextHop::Interface(interface.clone()),
         cost: Some(0),
-    };
+      };
 
       routing_table
         .entry(prefix_len)
@@ -116,7 +117,7 @@ impl Table {
       }
     }
     None
-}
+  }
 
   pub fn get_routes(&self) -> Vec<Route> {
     let mut routes: Vec<Route> = Vec::new();
@@ -132,16 +133,89 @@ impl Table {
     return routes;
   }
 
-  pub fn ez_lookup<'a>(routing_table: &'a HashMap<u8, HashMap<u32, Route>>, 
-    keys: &'a Vec<u8>, ip_addr: Ipv4Addr) -> Option<&'a Route> {
-    for prefix in keys {
-        let hash = Table::hash(&ip_addr, *prefix);
-        if let Some(ip_table) = routing_table.get(prefix) {
-            if let Some(interface) = ip_table.get(&hash) {
-                return Some(interface);
-            }
-        }
+  // Function to determine if a route should be advertised based on Split Horizon
+  pub fn should_advertise(&self, route: &Route, source: &NextHop) -> bool {
+      // Logic to determine if the route should be advertised back to the source
+      match &route.next_hop {
+          NextHop::Interface(interface) => {
+              // Check if the source is the same interface (prevent advertising back)
+              if let NextHop::Interface(src_interface) = source {
+                  return interface != src_interface;
+              }
+          }
+          NextHop::IPAddress(ip_addr) => {
+              // Prevent advertising back to the source IP address
+              if let NextHop::IPAddress(src_ip) = source {
+                  return ip_addr != src_ip;
+              }
+          }
+      }
+      true // Advertise if it doesn't match
+    }
+  
+  pub fn add_route(&mut self, address: u32, mask: u32, route: Route){
+    let ip = Ipv4Addr::from(address);
+    let prefix_len: u8 = mask.count_ones().try_into().unwrap();
+    let hash = Table::hash(&ip, prefix_len);
+
+    self.routing_table.entry(prefix_len)
+      .or_insert_with(HashMap::new)
+      .insert(hash, route);
+  }
+
+  pub fn remove_route(&mut self, dest_address: u32, dest_mask: u32) -> Option<Route> {
+    let ip = Ipv4Addr::from(dest_address);
+    let prefix_len: u8 = dest_mask.count_ones().try_into().unwrap();
+    let hash = Table::hash(&ip, prefix_len);
+
+    if let Some(route_map) = self.routing_table.get_mut(&prefix_len) {
+      let route = route_map.remove(&hash);
+
+      if route_map.is_empty() {
+        self.routing_table.remove(&prefix_len);
+        self.keys = Table::sort_keys(&self.routing_table);
+      }
+      return route
     }
     None
+  }
+
+  pub fn update_route(&mut self, src_ip: Ipv4Addr, entry: Entry) {
+    let ip = Ipv4Addr::from(entry.address);
+    let prefix_len: u8 = entry.mask.count_ones().try_into().unwrap();
+    let hash = Table::hash(&ip, prefix_len);
+    let cost = u8::try_from(entry.cost).unwrap();
+    let prefix = Ipv4Net::new(ip, prefix_len).unwrap();
+    
+    let mut route: Route = Route { 
+      routing_mode: RoutingType::Rip, 
+      prefix, 
+      next_hop: NextHop::IPAddress(src_ip), 
+      cost: Some(cost + 1),
+    };
+    
+    // Check if the route exists in the table
+    if let Some(route_map) = self.routing_table.get_mut(&prefix_len) {
+        if let Some(existing_route) = route_map.get_mut(&hash) {
+            // If the route exists, compare the cost
+            if let Some(existing_cost) = existing_route.cost {
+              if let Ok(new_cost) = u8::try_from(entry.cost) {
+                if new_cost + 1 < existing_cost {
+                  route_map.get_mut(&hash).replace(&mut route);
+                }
+              }
+            }
+        } else {
+          if !self.should_advertise(&route, &NextHop::IPAddress(src_ip)) {
+            // If Split Horizon applies, USE COST OF INFINITY  
+          }
+          self.add_route(entry.address, entry.mask, route);
+        }
+    } else {
+        // If the prefix length key does not exist, create it and add the route
+        self.add_route(entry.address, entry.mask, route);
+    }
+    // Update keys after adding a new route
+    self.keys = Table::sort_keys(&self.routing_table);
   }
 }
