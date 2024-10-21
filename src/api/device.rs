@@ -151,7 +151,12 @@ impl Device {
 
   pub fn list_routes(&mut self) {
       println!("T       Prefix   Next hop   Cost");
-      for route in &self.routing_table.get_routes() {
+      let timeout = if let Some(rip_timeout) = self.rip_timeout_threshold {
+          Some(rip_timeout)
+      } else {
+          None
+      };
+      for route in &self.routing_table.get_routes(timeout) {
           let routing_type = match route.routing_mode {
               RoutingType::None => "L".to_string(),
               RoutingType::Static => "S".to_string(),
@@ -252,8 +257,8 @@ impl Device {
     }
   }
 
-  pub fn start_periodic_updates(device: Arc<Mutex<Device>>) {
-    let mut interval = Duration::from_secs(5); // 5 seconds interval default
+  pub fn start_periodic_updates(&self, device: Arc<Mutex<Device>>) {
+    let mut interval = Duration::from_secs(self.rip_periodic_update_rate.unwrap()); // 5 seconds interval default
     loop {
       if let Ok(device) = device.try_lock() {
         // treat it like a rip request without any source of the request
@@ -272,7 +277,7 @@ impl Device {
         loop {
           if let Ok(mut device) = device.try_lock() {
             // treat it like a rip request without any source of the request
-            device.process_rip_request();
+            device.send_rip_updates();
             break;
           }
         }
@@ -284,13 +289,43 @@ impl Device {
     }
   }
 
+  pub fn send_rip_updates(&mut self) {
+      let mut entries = Vec::new();
+      for route in self.routing_table.get_routes(Some(self.rip_timeout_threshold.unwrap())) {
+        if route.cost.unwrap() >= 16 {
+            let cost: u32 = route.cost.unwrap().into();
+            let address = route.prefix.addr().to_bits();
+            let mask = route.prefix.netmask().to_bits();
+            let entry = Entry {
+                cost: cost.clone(), 
+                address: address.clone(), 
+                mask: mask.clone(),
+            };
+            let rip_packet = RipPacket::new(2, 1, vec![entry]);
+            println!("Sending RIP packet to neighbors: {:?}", rip_packet);
+            self.send_rip_to_neighbors(rip_packet);
+            self.routing_table.remove_route(address, mask);
+        } else if let NextHop::Interface(interface) = route.next_hop {
+            if let Some(cost) = route.cost {
+            entries.push(Entry { 
+                cost: cost.into(), 
+                address: interface.assigned_ip.to_bits(), 
+                mask: interface.assigned_prefix.netmask().to_bits() })
+            }
+        }
+    }
+    let rip_packet = RipPacket::new(2, entries.len() as u16, entries);
+    println!("Sending RIP packet to neighbors: {:?}", rip_packet);
+    self.send_rip_to_neighbors(rip_packet);
+}
+
   pub fn process_rip_packet(&mut self, packet: Packet) {
     let rip_message = packet.parse_rip_message();
     match rip_message {
       Ok(rip_packet) => {
         match rip_packet.command {
           // only send out to the person who requested
-          1 => self.process_rip_request(),
+          1 => self.process_rip_request(packet),
           2 => self.process_rip_response(packet.src_ip, rip_packet.entries),
           _ => {
           // Handle unknown command
@@ -307,10 +342,10 @@ impl Device {
   /*
     Creates and sends a rip response to the address of the router that requested.
    */
-  pub fn process_rip_request(&mut self) {
+  pub fn process_rip_request(&mut self, packet: Packet) {
     // create the payload with the route information for interfaces that are enabled
     let mut entries: Vec<Entry> = Vec::new();
-    for route in self.routing_table.get_routes(){
+    for route in self.routing_table.get_routes(Some(self.rip_timeout_threshold.unwrap())) {
       // check if route has expired or cost is >= 16, then send RIP accordingly
       if route.cost.unwrap() >= 16 {
         let cost: u32 = route.cost.unwrap().into();
@@ -332,13 +367,13 @@ impl Device {
             address: interface.assigned_ip.to_bits(), 
             mask: interface.assigned_prefix.netmask().to_bits() })
         }
-
       }
     }
     let rip_packet = RipPacket::new(2, entries.len() as u16, entries);
-
-    println!("Sending RIP packet to neighbors: {:?}", rip_packet);
-    self.send_rip_to_neighbors(rip_packet);
+    let next_route = self.routing_table.lookup(packet.src_ip);
+    let packet = Packet::new(packet.dest_ip, packet.src_ip, 200, rip_packet.serialize_rip());
+    println!("Sending RIP packet to neighbor: {:?}", rip_packet);
+    self.forward_packet(packet, next_route.unwrap().next_hop.clone());
   }
   
   pub fn send_rip_to_neighbors(&mut self, rip_packet: RipPacket) {

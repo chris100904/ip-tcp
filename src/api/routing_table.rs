@@ -124,7 +124,7 @@ impl Table {
     None
   }
 
-  pub fn get_routes(&mut self) -> Vec<Route> {
+  pub fn get_routes(&mut self, timeout: Option<u64>) -> Vec<Route> {
     let mut routes: Vec<Route> = Vec::new();
     let prefixes: Vec<u8> = self.routing_table.keys().cloned().collect();
     for prefix in prefixes {
@@ -132,11 +132,13 @@ impl Table {
         let hashes: Vec<u32> = route_map.keys().cloned().collect();
         for hash in hashes {
           if let Some(route) = route_map.get_mut(&hash) {
-            let now = Instant::now();
-            let expiration_time = Duration::from_secs(12);
-            if now.duration_since(route.last_updated) > expiration_time {
-              // Route has expired, set its cost to infinity (16)
-              route.cost = Some(16);
+            if let Some(expiration_secs) = timeout {
+                let now = Instant::now();
+                let expiration_time = Duration::from_secs(expiration_secs);
+                if now.duration_since(route.last_updated) > expiration_time {
+                    // Route has expired, set its cost to infinity (16)
+                    route.cost = Some(16);
+                }
             }
             routes.push(route.clone());
           }
