@@ -207,6 +207,7 @@ impl Table {
 
     if let Some(route_map) = self.routing_table.get_mut(&prefix_len) {
       let route = route_map.remove(&hash);
+      println!("Removed Route: {:?}", route);
 
       if route_map.is_empty() {
         self.routing_table.remove(&prefix_len);
@@ -239,6 +240,7 @@ impl Table {
             if let Some(existing_cost) = existing_route.cost {
               if let Ok(new_cost) = u8::try_from(entry.cost) {
                 if new_cost + 1 <= existing_cost {
+                  println!("Updating Route: {:?} from Route: {:?}", route, existing_route);
                   route_map.get_mut(&hash).replace(&mut route);
                 } else {
                   return None;
@@ -250,10 +252,12 @@ impl Table {
             // If Split Horizon applies, USE COST OF INFINITY  
             route.cost = Some(16);
           }
+          println!("Adding Route: {:?}", route);
           self.add_route(entry.address, entry.mask, route);
         }
     } else {
         // If the prefix length key does not exist, create it and add the route
+        println!("Adding Route: {:?}", route);
         self.add_route(entry.address, entry.mask, route);
     }
     // Update keys after adding a new route

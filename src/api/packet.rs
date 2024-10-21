@@ -13,11 +13,14 @@ pub struct Packet {
     pub header_checksum: u16, // error-checking header 
 }
 
+#[derive(Debug)]
 pub struct RipPacket {
   pub command: u16,
   pub num_entries: u16,
   pub entries: Vec<Entry>
 }
+
+#[derive(Debug)]
 pub struct Entry {
   pub cost: u32,
   pub address: u32,

@@ -55,6 +55,5 @@ pub fn repl(sender: Sender<Command>) -> Result<()> {
             }
         }
     }
-
     Ok(())
 }

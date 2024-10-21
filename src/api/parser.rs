@@ -79,7 +79,7 @@ impl RoutingType {
         match self {
             RoutingType::None => RoutingType::None,
             RoutingType::Static => RoutingType::Static,
-            RoutingType::Rip=> RoutingType::Rip,
+            RoutingType::Rip => RoutingType::Rip,
         }
     }
 }
