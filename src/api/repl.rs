@@ -1,4 +1,3 @@
-use rustyline::error::ReadlineError;
 use rustyline::{DefaultEditor, Result};
 use std::sync::mpsc::Sender;
 use crate::api::Command;

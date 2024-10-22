@@ -1,5 +1,5 @@
 use std::{collections::HashMap, net::Ipv4Addr};
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::Ipv4Net;
 use std::time::{Duration, Instant};
 
 use super::{packet::Entry, parser::{IPConfig, InterfaceConfig, RoutingType}};
@@ -7,14 +7,16 @@ use super::{packet::Entry, parser::{IPConfig, InterfaceConfig, RoutingType}};
 #[derive(Debug, Clone)]
 pub enum NextHop {
   Interface(InterfaceConfig),
-  IPAddress(Ipv4Addr)
+  IPAddress(Ipv4Addr),
+  RIPAddress(Ipv4Net)
 }
 
 impl NextHop {
   pub fn clone(&self) -> NextHop {
     match self {
       NextHop::IPAddress(addr) => return NextHop::IPAddress(addr.clone()),
-      NextHop::Interface(interface) => return NextHop::Interface(interface.clone())
+      NextHop::Interface(interface) => return NextHop::Interface(interface.clone()),
+      NextHop::RIPAddress(prefix) => return NextHop::RIPAddress(prefix.clone())
     }
   }
 }
@@ -132,13 +134,18 @@ impl Table {
         let hashes: Vec<u32> = route_map.keys().cloned().collect();
         for hash in hashes {
           if let Some(route) = route_map.get_mut(&hash) {
-            if let Some(expiration_secs) = timeout {
+            if route.routing_mode == RoutingType::Rip {
+              if let Some(expiration_secs) = timeout {
                 let now = Instant::now();
-                let expiration_time = Duration::from_secs(expiration_secs);
+                let expiration_time = Duration::from_millis(expiration_secs);
+                // println!("LAST TIME: {:?}, NOW: {:?}", route.last_updated, now);
+                // println!("EXPIRATION TIME: {:?}", expiration_time);
                 if now.duration_since(route.last_updated) > expiration_time {
                     // Route has expired, set its cost to infinity (16)
+                    println!("HI IT TIMED OUT");
                     route.cost = Some(16);
                 }
+              }
             }
             routes.push(route.clone());
           }
@@ -188,6 +195,11 @@ impl Table {
                   return ip_addr != src_ip;
               }
           }
+          NextHop::RIPAddress(prefix) => {
+            if let NextHop::RIPAddress(src_ip) = source {
+              return prefix.addr() != src_ip.addr();
+            }
+          }
       }
       true // Advertise if it doesn't match
     }
@@ -209,7 +221,7 @@ impl Table {
 
     if let Some(route_map) = self.routing_table.get_mut(&prefix_len) {
       let route = route_map.remove(&hash);
-      println!("Removed Route: {:?}", route);
+      // println!("Removed Route: {:?}", route);
 
       if route_map.is_empty() {
         self.routing_table.remove(&prefix_len);
@@ -235,6 +247,7 @@ impl Table {
       last_updated: Instant::now(),
     };
     
+    let should_advertise = self.should_advertise(&route, &NextHop::IPAddress(src_ip));
     // Check if the route exists in the table
     if let Some(route_map) = self.routing_table.get_mut(&prefix_len) {
         if let Some(existing_route) = route_map.get_mut(&hash) {
@@ -242,24 +255,28 @@ impl Table {
             if let Some(existing_cost) = existing_route.cost {
               if let Ok(new_cost) = u8::try_from(entry.cost) {
                 if new_cost + 1 <= existing_cost {
-                  println!("Updating Route: {:?} from Route: {:?}", route, existing_route);
-                  route_map.get_mut(&hash).replace(&mut route);
+                  println!("Updating Route: {:?}", route);
+                  route_map.remove(&hash);
+                  route_map.insert(hash, route);
+                } else if new_cost == 16 && should_advertise {
+                  route_map.remove(&hash);
+                  return None;
                 } else {
                   return None;
                 }
               }
             }
         } else {
-          if !self.should_advertise(&route, &NextHop::IPAddress(src_ip)) {
+          if self.should_advertise(&route, &NextHop::IPAddress(src_ip)) {
             // If Split Horizon applies, USE COST OF INFINITY  
             route.cost = Some(16);
           }
-          println!("Adding Route: {:?}", route);
+          // println!("Adding Route: {:?}", route);
           self.add_route(entry.address, entry.mask, route);
         }
     } else {
         // If the prefix length key does not exist, create it and add the route
-        println!("Adding Route: {:?}", route);
+        // println!("Adding NEW Route: {:?}", route);
         self.add_route(entry.address, entry.mask, route);
     }
     // Update keys after adding a new route

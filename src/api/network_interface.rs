@@ -70,7 +70,7 @@ impl NetworkInterface {
         // Lock the UDP socket and send the packet
         match self.udp_socket.lock().unwrap().send_to(&serialized_packet, destination_addr) {
             Ok(sent_bytes) => {
-              println!("Sent {} bytes", sent_bytes);
+              // println!("Sent {} bytes", sent_bytes);
               // println!("Successfully sent {} bytes to {}.", sent_bytes, destination_addr);
             }
             Err(e) => {

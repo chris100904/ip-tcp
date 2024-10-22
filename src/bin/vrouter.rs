@@ -42,11 +42,11 @@ fn main() {
         Device::listen_for_commands(router_clone, rx);
     });
     // send a rip request to all neighbors at the start
-
+    
     // start the periodic updates
     let router_clone_2 = Arc::clone(&router);
     thread::spawn(move || { 
-      Device::start_periodic_updates(Arc::clone(&router_clone_2));
+      Device::start_periodic_updates(router_clone_2);
     });
     
     Device::receive_from_interface(router, packet_receiver);
