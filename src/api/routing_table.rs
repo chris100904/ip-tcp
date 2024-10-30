@@ -255,7 +255,7 @@ impl Table {
             if let Some(existing_cost) = existing_route.cost {
               if let Ok(new_cost) = u8::try_from(entry.cost) {
                 if new_cost + 1 <= existing_cost {
-                  println!("Updating Route: {:?}", route);
+                  //println!("Updating Route: {:?}", route);
                   route_map.remove(&hash);
                   route_map.insert(hash, route);
                 } else if new_cost == 16 && should_advertise {

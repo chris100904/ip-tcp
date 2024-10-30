@@ -258,6 +258,15 @@ impl Device {
           }  
         }
         NextHop::RIPAddress(prefix) => {
+          match self.routing_table.lookup(prefix.addr()) {
+            Some(new_route) => {
+                next_hop = new_route.next_hop.clone();
+            }
+            None => {
+                eprintln!("Error: No valid interface found for destination IP: {}", prefix.addr());
+                return;
+            }
+          }  
           println!("Received rip address in forwarding table: {:?}", prefix);
         }
       }
@@ -334,7 +343,7 @@ impl Device {
           }
         }
     }
-    println!("Entries: {:?}", entries.len());
+    // println!("Entries: {:?}", entries.len());
     let rip_packet = RipPacket::new(2, entries.len() as u16, entries);
     
     self.send_rip_to_neighbors(rip_packet);
@@ -392,14 +401,23 @@ impl Device {
             mask: interface.assigned_prefix.netmask().to_bits() 
           });
         }
+      } else if let NextHop::RIPAddress(prefix) = route.next_hop {
+        if let Some(cost) = route.cost {
+          entries.push(Entry { 
+            cost: cost.into(), 
+            address: prefix.addr().to_bits(), 
+            mask: prefix.netmask().to_bits() 
+          });
+        }
       }
-    }
+    } 
     // println!("HELLO\n");
     let rip_packet = RipPacket::new(2, entries.len() as u16, entries);
-    let next_route = self.routing_table.lookup(packet.src_ip);
     let packet = Packet::new(packet.dest_ip, packet.src_ip, 200, rip_packet.serialize_rip());
     // println!("Sending RIP packet to neighbor: {:?}", rip_packet);
-    self.forward_packet(packet, next_route.unwrap().next_hop.clone());
+    if let Some(next_route) =self.routing_table.lookup(packet.src_ip) {
+      self.forward_packet(packet, next_route.next_hop.clone());
+    }
   }
   
   pub fn send_rip_to_neighbors(&mut self, rip_packet: RipPacket) {
