@@ -85,6 +85,14 @@ impl Device {
                               Command::EnableInterface(ifname) => safe_device.enable_interface(&ifname),
                               Command::SendTestPacket(addr, msg) => safe_device.send_test_packet(&addr, &msg),
                               Command::Exit => break,
+                              Command::ListenAccept(_) => todo!(),
+                              Command::TCPConnect(_, _) => todo!(),
+                              Command::TCPSend(_, _) => todo!(),
+                              Command::TCPReceive(_, _) => todo!(),
+                              Command::TCPClose(_) => todo!(),
+                              Command::ListSockets => todo!(),
+                              Command::SendFile(_, _, _) => todo!(),
+                              Command::ReceiveFile(_, _) => todo!(),
                           }
                           break;
                       }

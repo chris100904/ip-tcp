@@ -41,6 +41,56 @@ pub fn repl(sender: Sender<Command>) -> Result<()> {
                             println!("Usage: send <addr> <message>");
                         }
                     }
+                    "a" => {
+                        if args.len() == 2 {
+                            sender.send(Command::ListenAccept(args[1].to_string())).unwrap();
+                        } else {
+                            println!("Usage: a <port>");
+                        }
+                    }
+                    "c" => {
+                        if args.len() == 3 {
+                            sender.send(Command::TCPConnect(args[1].to_string(), args[2].to_string())).unwrap();
+                        } else {
+                            println!("Usage: c <vip> <port>");
+                        }
+                    }
+                    "s" => {
+                        if args.len() == 3 {
+                            sender.send(Command::TCPSend(args[1].parse().unwrap(), args[2].to_string())).unwrap();
+                        } else {
+                            println!("Usage: s <socket ID> <bytes>");
+                        }
+                    }
+                    "r" => {
+                        if args.len() == 3 {
+                            sender.send(Command::TCPReceive(args[1].parse().unwrap(), args[2].parse().unwrap())).unwrap();
+                        } else {
+                            println!("Usage: r <socket ID> <numbytes>");
+                        }
+                    }
+                    "cl" => {
+                        if args.len() == 2 {
+                            sender.send(Command::TCPClose(args[1].parse().unwrap())).unwrap();
+                        } else {
+                            println!("Usage: cl <socket ID>");
+                        }
+                    }
+                    "ls" => sender.send(Command::ListSockets).unwrap(),
+                    "sf" => {
+                        if args.len() == 4 {
+                            sender.send(Command::SendFile(args[1].to_string(), args[2].to_string(), args[3].parse().unwrap())).unwrap();
+                        } else {
+                            println!("Usage: sf <file path> <addr> <port>");
+                        }
+                    }
+                    "rf" => {
+                        if args.len() == 3 {
+                            sender.send(Command::ReceiveFile(args[1].to_string(), args[2].parse().unwrap())).unwrap();
+                        } else {
+                            println!("Usage: rf <dest file> <port>")
+                        }
+                    }
                     "exit" => {
                         sender.send(Command::Exit).unwrap();
                         break;
