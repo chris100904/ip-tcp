@@ -4,7 +4,8 @@ pub mod parser;
 pub mod repl;
 pub mod routing_table;
 pub mod device;
-// pub mod socket;
+pub mod socket;
+pub mod tcp;
 
 pub enum CommandType {
   IP(IPCommand),

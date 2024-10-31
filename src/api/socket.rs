@@ -9,7 +9,7 @@ pub struct TcpListener {
 }
 
 impl TcpListener {
-  pub fn listen(&self) -> TcpListener {
+  pub fn listen() -> TcpListener {
       TcpListener {
           pending_connections: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
       }
