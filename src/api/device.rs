@@ -1,4 +1,3 @@
-use std::f32::consts::E;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
@@ -8,8 +7,8 @@ use std::time::{Duration, Instant};
 use super::network_interface::NetworkInterface;
 use super::packet::{self, Entry, Packet, RipPacket};
 use super::routing_table::{NextHop, Route, Table};
-use super::Command;
 use super::parser::{IPConfig, InterfaceConfig, NeighborConfig, RoutingType, StaticRoute};
+use super::IPCommand;
 
 #[derive(Debug)]
 pub struct InterfaceStruct {
@@ -71,28 +70,20 @@ impl Device {
       }
   }
 
-  pub fn listen_for_commands(device: Arc<Mutex<Device>>, receiver: Receiver<Command>) {
+  pub fn ip_protocol_handler(device: Arc<Mutex<Device>>, receiver: Receiver<IPCommand>) {
       loop {
           match receiver.recv() {
               Ok(command) => {
                   loop {
                       if let Ok(mut safe_device) = device.try_lock() {
                           match command {
-                              Command::ListInterfaces => safe_device.list_interfaces(),
-                              Command::ListNeighbors => safe_device.list_neighbors(),
-                              Command::ListRoutes => safe_device.list_routes(),
-                              Command::DisableInterface(ifname) => safe_device.disable_interface(&ifname),
-                              Command::EnableInterface(ifname) => safe_device.enable_interface(&ifname),
-                              Command::SendTestPacket(addr, msg) => safe_device.send_test_packet(&addr, &msg),
-                              Command::Exit => break,
-                              Command::ListenAccept(_) => todo!(),
-                              Command::TCPConnect(_, _) => todo!(),
-                              Command::TCPSend(_, _) => todo!(),
-                              Command::TCPReceive(_, _) => todo!(),
-                              Command::TCPClose(_) => todo!(),
-                              Command::ListSockets => todo!(),
-                              Command::SendFile(_, _, _) => todo!(),
-                              Command::ReceiveFile(_, _) => todo!(),
+                              IPCommand::ListInterfaces => safe_device.list_interfaces(),
+                              IPCommand::ListNeighbors => safe_device.list_neighbors(),
+                              IPCommand::ListRoutes => safe_device.list_routes(),
+                              IPCommand::DisableInterface(ifname) => safe_device.disable_interface(&ifname),
+                              IPCommand::EnableInterface(ifname) => safe_device.enable_interface(&ifname),
+                              IPCommand::SendTestPacket(addr, msg) => safe_device.send_test_packet(&addr, &msg),
+                              IPCommand::Exit => break,
                           }
                           break;
                       }
@@ -108,6 +99,7 @@ impl Device {
       match receiver.recv() {
         Ok((packet, src_ip)) => { 
           loop {
+            // check if the packet protocol is TCP --> send back to vhost
             if let Ok(mut safe_device) = device.try_lock() {
               for interface in &safe_device.interfaces {
                 if interface.config.udp_addr == src_ip {
@@ -490,7 +482,7 @@ impl Device {
       if self.is_packet_for_device(&packet.dest_ip) {
           if packet.protocol == 200 {
             self.process_rip_packet(packet);
-          } else if packet.protocol == 0{
+          } else if packet.protocol == 0 {
             self.process_local_packet(packet);
           }
       } else {

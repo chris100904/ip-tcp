@@ -1,3 +1,4 @@
+use std::sync::mpsc::{Receiver, Sender};
 use std::{env, thread};
 use std::net::Ipv4Addr;
 use std::sync::{mpsc, Arc, Mutex};
@@ -5,6 +6,7 @@ use ip_epa127::api::device::Device;
 use ip_epa127::api::repl::repl;
 use ip_epa127::api::packet::Packet;
 use ip_epa127::api::parser::IPConfig;
+use ip_epa127::api::{CommandType, IPCommand, TCPCommand};
 
 fn main() {
     // use `new` from parse to get the IPConfig
@@ -36,10 +38,22 @@ fn main() {
         repl(tx).unwrap();
     });
 
-    // The Host listens for commands from the REPL
+    // Create a channel for communication between the REPL and the Host
+    let (repl_send, repl_recv) = mpsc::channel();
+    let (ip_send, ip_recv) = mpsc::channel();
+
+    // Spawn the REPL in a separate thread
+    std::thread::spawn(move || {
+      repl(repl_send).unwrap();
+    });
+
+    std::thread::spawn(move || {
+      listen_for_commands(ip_send, repl_recv);
+    });
+
     let router_clone = Arc::clone(&router);
     thread::spawn(move ||{
-        Device::listen_for_commands(router_clone, rx);
+        Device::ip_protocol_handler(router_clone, ip_recv);
     });
     // send a rip request to all neighbors at the start
     
@@ -50,4 +64,20 @@ fn main() {
     });
     
     Device::receive_from_interface(router, packet_receiver);
+}
+
+pub fn listen_for_commands(ip_send: Sender<IPCommand>, repl_recv: Receiver<CommandType>) {
+  loop {
+      match repl_recv.recv() {
+        Ok(command) => {
+          match command {
+            CommandType::IP(command) => {
+              ip_send.send(command).unwrap();
+            },
+            CommandType::TCP(_) => {}
+          }
+        }
+        Err(_) => break,
+      }
+  }
 }
