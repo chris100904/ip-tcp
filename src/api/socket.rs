@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Condvar};
 
+use super::tcp::Socket;
+
 pub struct TcpListener {
   // TODO: add a TcpListener struct to hold the TcpListener object
   // A list of sockets for new/pending connections
@@ -31,19 +33,19 @@ impl TcpListener {
   }
 
   pub fn add_connection(&self, socket: Socket) {
-        let (lock, cvar) = &*self.pending_connections;
-        let mut connections = lock.lock().unwrap();
+    let (lock, cvar) = &*self.pending_connections;
+    let mut connections = lock.lock().unwrap();
 
-        // Add the new connection
-        connections.push_back(socket);
+    // Add the new connection
+    connections.push_back(socket);
 
-        // Notify waiting threads that a new connection is available
-        cvar.notify_one();
+    // Notify waiting threads that a new connection is available
+    cvar.notify_one();
   }
 
   pub fn close(&self) -> Result<(), String> {
-      // TODO: Implement TCP closing
-      unimplemented!();
+    // TODO: Implement TCP closing
+    unimplemented!();
   }
 }
 

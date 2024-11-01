@@ -63,7 +63,7 @@ fn main() {
       Device::start_periodic_updates(router_clone_2);
     });
     
-    Device::receive_from_interface(router, packet_receiver);
+    Device::receive_from_interface(router, packet_receiver, None);
 }
 
 pub fn listen_for_commands(ip_send: Sender<IPCommand>, repl_recv: Receiver<CommandType>) {

@@ -1,4 +1,4 @@
-use etherparse::{Ipv4Header, Ipv4HeaderSlice, PacketBuilder, IpNumber, TcpHeader, TcpHeaderSlice};
+use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, PacketBuilder, TcpHeader, TcpHeaderSlice, TcpOptions};
 // use etherparse::checksum::u32_16bit_word;
 use std::{io::Error, net::Ipv4Addr};
 
@@ -27,7 +27,7 @@ pub struct TcpPacket {
   pub seq_num: u32,
   pub ack_num: u32, 
   pub data_offset: u8,
-  // pub flags: u8,
+  pub flags: TcpFlags,
   pub window: u16,
   pub checksum: u16,
   pub urgent_pointer: u16,
@@ -35,6 +35,17 @@ pub struct TcpPacket {
   pub payload: Vec<u8>
 }
 
+#[derive(Debug)]
+pub struct TcpFlags {
+  pub syn: bool,
+  pub ack: bool,
+  pub fin: bool,
+  pub rst: bool,
+  // pub psh: bool,
+  // pub urg: bool,
+  // pub ece: bool,
+  // pub cwr: bool,
+}
 #[derive(Debug)]
 pub struct Entry {
   pub cost: u32,
@@ -84,26 +95,35 @@ impl RipPacket {
 }
 
 impl TcpPacket {
-  pub fn serialize_tcp(&self) -> Vec<u8> {
-    let mut tcp_bytes = Vec::with_capacity(20 + self.payload.len());
+  pub fn serialize_tcp(&self, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
+    let mut tcp_header = TcpHeader::new(
+      self.src_port,     // source port
+      self.dest_port,     // destination port
+      self.seq_num,  // sequence number
+      self.window,   // window size
+    );
+    tcp_header.ack = self.flags.ack;
+    tcp_header.syn = self.flags.syn;
+    tcp_header.rst = self.flags.rst;
+    tcp_header.fin = self.flags.fin;
+    tcp_header.acknowledgment_number = self.ack_num;
+    tcp_header.urgent_pointer = self.urgent_pointer;
+    tcp_header.options = TcpOptions::try_from_slice(&self.options).unwrap();
+    
+    tcp_header.checksum = tcp_header
+      .calc_checksum_ipv4_raw(src_ip.octets(), dst_ip.octets(), &self.payload)
+      .expect("Failed to calculate TCP checksum");
 
-        // Serialize TCP header
-        tcp_bytes.extend_from_slice(&self.src_port.to_be_bytes());
-        tcp_bytes.extend_from_slice(&self.dest_port.to_be_bytes());
-        tcp_bytes.extend_from_slice(&self.seq_num.to_be_bytes());
-        tcp_bytes.extend_from_slice(&self.ack_num.to_be_bytes());
-        tcp_bytes.extend_from_slice(&[self.data_offset, self.flags]);
-        tcp_bytes.extend_from_slice(&self.window.to_be_bytes());
-        tcp_bytes.extend_from_slice(&self.checksum.to_be_bytes());
-        tcp_bytes.extend_from_slice(&self.urgent_pointer.to_be_bytes());
+    // Buffer to hold the TCP header and payload
+    let mut result: Vec<u8> = Vec::with_capacity(tcp_header.header_len() as usize + self.payload.len());
 
-        // Serialize TCP options
-        tcp_bytes.extend_from_slice(&self.options);
+    // Write the TCP header into the buffer
+    tcp_header.write(&mut result);
 
-        // Serialize TCP data
-        tcp_bytes.extend_from_slice(&self.payload);
+    // Append the TCP payload
+    result.extend_from_slice(&self.payload);
 
-        tcp_bytes
+    result
   }
 
   pub fn parse_tcp(raw_data: &[u8]) -> Result<TcpPacket, String> {
@@ -118,14 +138,14 @@ impl TcpPacket {
     // Extract payload
     let payload = &raw_data[header_len..];
 
+    // TODO: Validations? (Flags, checksum)
     Ok(TcpPacket {
         src_port: header.source_port,
         dest_port: header.destination_port,
         seq_num: header.sequence_number,
         ack_num: header.acknowledgment_number,
         data_offset: tcp_slice.data_offset() as u8,
-        // flags aren't defined in etherparse? but is in the official protocol thing
-        // flags: header.flags, 
+        flags: TcpFlags { syn: header.syn, ack: header.ack, fin: header.fin, rst: header.rst }, 
         window: header.window_size,
         checksum: header.checksum,
         urgent_pointer: header.urgent_pointer,

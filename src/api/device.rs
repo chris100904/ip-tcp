@@ -4,6 +4,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use etherparse::IpNumber;
+
 use super::network_interface::NetworkInterface;
 use super::packet::{self, Entry, Packet, RipPacket};
 use super::routing_table::{NextHop, Route, Table};
@@ -94,7 +96,8 @@ impl Device {
       }
   }
 
-  pub fn receive_from_interface(device: Arc<Mutex<Device>>, receiver: Receiver<(Packet, Ipv4Addr)>) {
+  pub fn receive_from_interface(device: Arc<Mutex<Device>>, 
+    receiver: Receiver<(Packet, Ipv4Addr)>, tcp_sender: Option<Sender<(Packet, Ipv4Addr)>>) {
     loop {
       match receiver.recv() {
         Ok((packet, src_ip)) => { 
@@ -105,7 +108,29 @@ impl Device {
                 if interface.config.udp_addr == src_ip {
                   if interface.enabled {
                     // println!("RECEIVING FROM INTERFACE\n");
-                    safe_device.process_packet(packet); // Process the packet
+                    // check if the packet dest_ip matches any of the interfaces
+                    if safe_device.is_packet_for_device(&packet.dest_ip) {
+                      if packet.protocol == 200 {
+                        safe_device.process_rip_packet(packet);
+                      } else if packet.protocol == 0 {
+                        safe_device.process_local_packet(packet);
+                      } else if packet.protocol == IpNumber::TCP.0 {
+                        if let Some(ref sender) = tcp_sender {
+                          sender.send((packet, src_ip));
+                        }
+                      }
+                    } else {
+                        // packet is not meant for this device, so we need to forward it
+                        match safe_device.routing_table.lookup(packet.dest_ip) {
+                            Some(route) => {
+                                // println!("ROUTE: {:?}", route);
+                                safe_device.forward_packet(packet, route.next_hop.clone());
+                            }
+                            None => {
+                                eprintln!("Error: No valid interface found for destination IP: {}", packet.dest_ip);
+                            }
+                        }
+                    }
                     break;
                   }
                 }
@@ -476,28 +501,6 @@ impl Device {
         self.send_rip_to_neighbors(rip_packet);
     }
 }
-
-  pub fn process_packet(&mut self, packet: Packet) {
-      // check if the packet dest_ip matches any of the interfaces
-      if self.is_packet_for_device(&packet.dest_ip) {
-          if packet.protocol == 200 {
-            self.process_rip_packet(packet);
-          } else if packet.protocol == 0 {
-            self.process_local_packet(packet);
-          }
-      } else {
-          // packet is not meant for this device, so we need to forward it
-          match self.routing_table.lookup(packet.dest_ip) {
-              Some(route) => {
-                  // println!("ROUTE: {:?}", route);
-                  self.forward_packet(packet, route.next_hop.clone());
-              }
-              None => {
-                  eprintln!("Error: No valid interface found for destination IP: {}", packet.dest_ip);
-              }
-          }
-      }
-  }
 
   // Process packets meant for the device (like a host would do)
   pub fn process_local_packet(&mut self, packet: Packet) {
