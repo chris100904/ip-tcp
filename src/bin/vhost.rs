@@ -115,15 +115,27 @@ pub fn send_tcp_packet(host_clone: Arc<Mutex<Device>>, ip_recv_tcp: Receiver<>) 
       Ok((packet, src_ip)) => {
         loop {
           match host_clone.try_lock() {
-            Ok(mut safe_host) => {}
-              safe_host.forward_packet(packet, next_hop);
+            Ok(mut safe_host) => {
+              // Look up the next hop in the routing table
+              match safe_host.routing_table.lookup(packet.dest_ip) {
+                Some(route) => {
+                // Forward the packet using the next hop from the route
+                  safe_host.forward_packet(packet, route.next_hop.clone());
+                },
+                None => {
+                  eprintln!("No route found for destination IP: {}", packet.dest_ip);
+                }
+              }
               break;
             }
             Err(e) => {}
           }
         }
       },
-      Err(e) => {}
+      Err(e) => {
+        eprintln!("Error receiving TCP packet: {:?}", e);
+
+      }
     }
   }
 }
