@@ -6,7 +6,7 @@ use rand::Rng;
 
 use super::{packet::{Packet, TcpFlags, TcpPacket}, socket::{self, Connection, TcpListener, TcpStream}, TCPCommand};
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub struct SocketKey {
     pub local_ip: Option<Ipv4Addr>,
     pub local_port: Option<u16>,
@@ -19,8 +19,8 @@ impl SocketKey {
     SocketKey { 
       local_ip: self.local_ip, 
       local_port: self.local_port, 
-      remote_ip: self.local_ip, 
-      remote_port: self.local_port
+      remote_ip: self.remote_ip, 
+      remote_port: self.remote_port
     }
   }
 }
@@ -33,7 +33,7 @@ pub struct Tcp {
     pub used_ports: Arc<Mutex<HashSet<u16>>>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum TcpSocket {
     Listener(TcpListener),
     Stream(TcpStream),
@@ -49,7 +49,7 @@ pub struct ListenerHandle {
 /* 
     I think this is all from the rfc9293 thing, but I'm not sure if we need every single one of these in our project?
 */
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum SocketStatus {
     Closed,
     Listening,
@@ -65,7 +65,7 @@ pub enum SocketStatus {
 }
 
 // socket struct definition
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Socket {
     pub socket_id: u32,
     pub status: SocketStatus,
@@ -100,18 +100,12 @@ impl Tcp {
      */
     pub fn tcp_protocol_handler(tcp: Arc<Mutex<Tcp>>, receiver: Receiver<TCPCommand>) {
       loop {
+        let tcp_clone = Arc::clone(&tcp);
           match receiver.recv() {
               Ok(command) => {
                   match command {
-                      TCPCommand::ListenAccept(port) => Tcp::listen_and_accept(tcp, port),
-                      TCPCommand::TCPConnect(vip, port) => {
-                        loop {
-                          if let Ok(mut safe_tcp) = tcp.try_lock() {
-                              safe_tcp.connect(vip.parse().unwrap(), port.parse().unwrap());
-                              break;
-                            }
-                          }
-                      },
+                      TCPCommand::ListenAccept(port) => Tcp::listen_and_accept(tcp_clone, port),
+                      TCPCommand::TCPConnect(vip, port) => Tcp::connect(&tcp, vip.parse().unwrap(), port.parse().unwrap()),
                       TCPCommand::ListSockets => {
                         loop {
                           if let Ok(mut safe_tcp) = tcp.try_lock() {
@@ -127,7 +121,6 @@ impl Tcp {
                       TCPCommand::SendFile(path, addr, port) => {},// safe_tcp.send_file(&path, Ipv4Addr::from_str(addr).unwrap(), &port.parse().unwrap()),
                       TCPCommand::ReceiveFile(path, port) => {},// safe_tcp.receive_file(&path, &port.parse().unwrap()),
                   }
-                  break;
               }
               Err(_) => break,
           }
@@ -157,15 +150,16 @@ impl Tcp {
         let stop_signal = Arc::new((Mutex::new(false), Condvar::new()));
         let stop_signal_clone = Arc::clone(&stop_signal);
 
-        let tcp_clone = Arc::clone(&tcp);
+        let mut tcp_clone = Arc::clone(&tcp);
         let thread_handle = thread::spawn(move || {
             loop {
+              println!("Listen accept loop");
                 let should_stop = {
                     let (lock, cvar) = &*stop_signal_clone;
                     let mut stop = lock.lock().unwrap();
-                    while !*stop {
-                        stop = cvar.wait(stop).unwrap();
-                    }
+                    // while !*stop {
+                    //     stop = cvar.wait(stop).unwrap();
+                    // }
                     *stop
                 };
 
@@ -174,12 +168,8 @@ impl Tcp {
                     // Stop protocol?
                     break;
                 }
-                loop {
-                  if let Ok(safe_tcp) = tcp.try_lock() {
-                    tcp_listener.accept(&safe_tcp);
-                    break;
-                  }
-                }
+                tcp_listener.accept(Arc::clone(&tcp_clone));
+              
                 // match tcp_listener.accept(self) { 
                 //     Ok(new_socket) => {
                 //         // insert adding new socket implementation
@@ -201,15 +191,15 @@ impl Tcp {
     pub fn stop_listening(&self, handle: &mut ListenerHandle) {
         // Destructure the stop_signal into its Mutex and Condvar components
         let (lock, cvar) = &*handle.stop_signal;
-        
-        // Acquire the lock on the stop flag
-        let mut stop = lock.lock().unwrap();
-        
-        // Set the stop flag to true
-        *stop = true;
-        
+        {
+          // Acquire the lock on the stop flag
+          let mut stop = lock.lock().unwrap();
+          
+          // Set the stop flag to true
+          *stop = true;
+        }
         // Notify one waiting thread (the listener thread) that the stop flag has changed
-        cvar.notify_one();
+        cvar.notify_all();
 
         // Check if the thread handle exists, and if so, take ownership of it
         if let Some(thread) = handle.thread_handle.take() {
@@ -231,6 +221,7 @@ impl Tcp {
 
     // Receive a packet
     pub fn receive_packet(&mut self, packet: Packet, src_ip: Ipv4Addr) {
+      println!("{:?}", packet);
       let src_ip = packet.src_ip;
       let dest_ip = packet.dest_ip;
       let tcp_packet = TcpPacket::parse_tcp(&packet.payload).unwrap();
@@ -242,24 +233,27 @@ impl Tcp {
         remote_port: Some(tcp_packet.src_port),
     };
 
+    println!("{:?}", tcp_packet.flags);
       match tcp_packet.flags {
         flag if flag == TcpFlags::SYN => {
           // Check if tcp_packet.dst_port is a LISTEN port (src_port in socket table)
           if let Some(listen_socket) = self.is_listen(tcp_packet.dest_port) {
-            if let TcpSocket::Listener(listen_conn) = listen_socket.tcp_socket {
-
-              // Check if connection is not already in the queue.
-              if let Ok(incoming_connections) = listen_conn.incoming_connections.0.lock() {
-                let keys: HashSet<SocketKey> = incoming_connections.clone().into_iter().map(|connection| connection.socket_key).collect();
-                if !keys.contains(&socket_key) {
-                  // Add connection, otherwise drop packet.
+            if let TcpSocket::Listener(ref listen_conn) = listen_socket.tcp_socket {
+              // Acquire lock to check for existing connection
+              let already_exists = {
+                  let incoming_connections = listen_conn.incoming_connections.0.lock().unwrap();
+                  incoming_connections.iter().any(|conn| conn.socket_key == socket_key)
+              }; // Lock is released here as `incoming_connections` goes out of scope
+              
+              if !already_exists {
+                  // Add connection if not already present
                   let connection = Connection {
-                    socket_key: socket_key,
-                    seq_num: tcp_packet.seq_num,
-                    ack_num: tcp_packet.ack_num
+                      socket_key,
+                      seq_num: tcp_packet.seq_num,
+                      ack_num: tcp_packet.ack_num,
                   };
-                  listen_conn.add_connection(connection);
-                }
+                  println!("Adding connection: {:?}", connection);
+                  listen_conn.add_connection(connection); // Safe to call `add_connection` here
               }
             }
           }
@@ -287,8 +281,9 @@ impl Tcp {
               // If so, then finish accept() and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
-                *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num);
-
+                {
+                  *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num);
+                }
                 // Notify waiting threads that a new connection is available
                 cvar.notify_all(); // changed one to all
               }
@@ -353,13 +348,16 @@ impl Tcp {
       }
     }
 
-    pub fn connect(&mut self, vip: Ipv4Addr, port: u16) {
+    pub fn connect(tcp: &Arc<Mutex<Self>>, vip: Ipv4Addr, port: u16) {
       // Create new normal socket
-      let clientConn = TcpStream::connect(self, vip, port).unwrap();
+      let clientConn = TcpStream::connect(Arc::clone(tcp), vip, port).unwrap();
     }
 
     pub fn list_sockets(&self) {
-
+      println!("SID      LAddr LPort      RAddr RPort       Status");
+      for (socket_key, socket) in self.socket_table.lock().unwrap().iter() {
+        println!("{:?}      {:?}    {:?}        {:?}   {:?}       {:?}", socket.socket_id, socket_key.local_ip, socket_key.local_port, socket_key.remote_ip, socket_key.remote_port, socket.status);
+      }
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////////
