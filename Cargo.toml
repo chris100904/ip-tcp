@@ -12,6 +12,8 @@ name = "vrouter"
 path = "src/bin/vrouter.rs"
 
 [dependencies]
+bitflags = "2.6.0"
 etherparse = "0.16"
 ipnet = "2.10.1"
+rand = "0.8.5"
 rustyline = "14.0.0"

@@ -22,7 +22,7 @@ pub enum IPCommand {
 }
 
 pub enum TCPCommand {
-  ListenAccept(String),
+  ListenAccept(u16),
   TCPConnect(String, String),
   TCPSend(u32, String),
   TCPReceive(u32, u32),

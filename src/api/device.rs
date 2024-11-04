@@ -97,7 +97,7 @@ impl Device {
   }
 
   pub fn receive_from_interface(device: Arc<Mutex<Device>>, 
-    receiver: Receiver<(Packet, Ipv4Addr)>, tcp_sender: Option<Sender<(Packet, Ipv4Addr)>>) {
+    receiver: Receiver<(Packet, Ipv4Addr)>, ip_send_tcp: Option<Sender<(Packet, Ipv4Addr)>>) {
     loop {
       match receiver.recv() {
         Ok((packet, src_ip)) => { 
@@ -115,7 +115,7 @@ impl Device {
                       } else if packet.protocol == 0 {
                         safe_device.process_local_packet(packet);
                       } else if packet.protocol == IpNumber::TCP.0 {
-                        if let Some(ref sender) = tcp_sender {
+                        if let Some(ref sender) = ip_send_tcp {
                           sender.send((packet, src_ip));
                         }
                       }

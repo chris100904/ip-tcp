@@ -43,7 +43,7 @@ pub fn repl(sender: Sender<CommandType>) -> Result<()> {
                     }
                     "a" => {
                         if args.len() == 2 {
-                            sender.send(CommandType::TCP(TCPCommand::ListenAccept(args[1].to_string()))).unwrap();
+                            sender.send(CommandType::TCP(TCPCommand::ListenAccept(args[1].parse().unwrap()))).unwrap();
                         } else {
                             println!("Usage: a <port>");
                         }

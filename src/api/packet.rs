@@ -1,6 +1,9 @@
 use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, PacketBuilder, TcpHeader, TcpHeaderSlice, TcpOptions};
 // use etherparse::checksum::u32_16bit_word;
+use bitflags::bitflags;
 use std::{io::Error, net::Ipv4Addr};
+
+use super::tcp::Tcp;
 
 #[derive(Debug)]
 pub struct Packet {
@@ -26,26 +29,39 @@ pub struct TcpPacket {
   pub dest_port: u16,
   pub seq_num: u32,
   pub ack_num: u32, 
-  pub data_offset: u8,
+  // pub data_offset: u8,
   pub flags: TcpFlags,
   pub window: u16,
   pub checksum: u16,
-  pub urgent_pointer: u16,
-  pub options: Vec<u8>,
+//  pub urgent_pointer: u16,
+//  pub options: Vec<u8>,
   pub payload: Vec<u8>
 }
 
-#[derive(Debug)]
-pub struct TcpFlags {
-  pub syn: bool,
-  pub ack: bool,
-  pub fin: bool,
-  pub rst: bool,
-  // pub psh: bool,
-  // pub urg: bool,
-  // pub ece: bool,
-  // pub cwr: bool,
+bitflags! {
+  #[derive(Debug, PartialEq)]
+  pub struct TcpFlags: u8 {
+      const SYN = 0b0000_0001;
+      const ACK = 0b0000_0010;
+      const FIN = 0b0000_0100;
+      const RST = 0b0000_1000;
+      // const PSH = 0b0001_0000;
+      // const URG = 0b0010_0000;
+      // const ECE = 0b0100_0000;
+      // const CWR = 0b1000_0000;
+  }
 }
+
+// pub struct TcpFlags {
+//   pub syn: bool,
+//   pub ack: bool,
+//   pub fin: bool,
+//   pub rst: bool,
+//   // pub psh: bool,
+//   // pub urg: bool,
+//   // pub ece: bool,
+//   // pub cwr: bool,
+// }
 #[derive(Debug)]
 pub struct Entry {
   pub cost: u32,
@@ -95,6 +111,30 @@ impl RipPacket {
 }
 
 impl TcpPacket {
+  pub fn new(src_port: u16, dest_port:u16, seq_num: u32, ack_num: u32, 
+    flags: TcpFlags, payload:Vec<u8>) -> TcpPacket {
+    TcpPacket {
+        src_port,
+        dest_port,
+        seq_num,
+        ack_num,
+        flags,
+        window: 65535, // Default value
+        checksum: 0, // Can be blank for now since it gets calculated and replaced later.
+        payload,
+    }
+  }
+  
+  pub fn new_syn(src_port: u16, dest_port: u16, seq_num: u32, ack_num: u32) -> TcpPacket {
+    TcpPacket::new(src_port, dest_port,
+    seq_num, ack_num, TcpFlags::SYN, Vec::new())
+  }
+
+  pub fn new_syn_ack(src_port: u16, dest_port: u16, new_seq_num: u32, new_ack_num: u32) -> TcpPacket {
+    TcpPacket::new(src_port, dest_port, new_seq_num, 
+    new_ack_num, TcpFlags::SYN | TcpFlags::ACK, Vec::new())
+  }
+
   pub fn serialize_tcp(&self, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
     let mut tcp_header = TcpHeader::new(
       self.src_port,     // source port
@@ -102,13 +142,12 @@ impl TcpPacket {
       self.seq_num,  // sequence number
       self.window,   // window size
     );
-    tcp_header.ack = self.flags.ack;
-    tcp_header.syn = self.flags.syn;
-    tcp_header.rst = self.flags.rst;
-    tcp_header.fin = self.flags.fin;
+    tcp_header.ack = self.flags.contains(TcpFlags::ACK);
+    tcp_header.syn = self.flags.contains(TcpFlags::SYN);
+    tcp_header.rst = self.flags.contains(TcpFlags::RST);
+    tcp_header.fin = self.flags.contains(TcpFlags::FIN);
     tcp_header.acknowledgment_number = self.ack_num;
-    tcp_header.urgent_pointer = self.urgent_pointer;
-    tcp_header.options = TcpOptions::try_from_slice(&self.options).unwrap();
+//    tcp_header.urgent_pointer = self.urgent_pointer;
     
     tcp_header.checksum = tcp_header
       .calc_checksum_ipv4_raw(src_ip.octets(), dst_ip.octets(), &self.payload)
@@ -138,18 +177,25 @@ impl TcpPacket {
     // Extract payload
     let payload = &raw_data[header_len..];
 
+
+
     // TODO: Validations? (Flags, checksum)
     Ok(TcpPacket {
         src_port: header.source_port,
         dest_port: header.destination_port,
         seq_num: header.sequence_number,
         ack_num: header.acknowledgment_number,
-        data_offset: tcp_slice.data_offset() as u8,
-        flags: TcpFlags { syn: header.syn, ack: header.ack, fin: header.fin, rst: header.rst }, 
+//        data_offset: tcp_slice.data_offset() as u8,
+        flags: TcpFlags::from_bits_truncate(
+            (header.syn as u8) << 0 | 
+            (header.ack as u8) << 1 | 
+            (header.fin as u8) << 2 | 
+            (header.rst as u8) << 3
+        ), 
         window: header.window_size,
         checksum: header.checksum,
-        urgent_pointer: header.urgent_pointer,
-        options: tcp_slice.options().to_vec(),
+//        urgent_pointer: header.urgent_pointer,
+//        options: tcp_slice.options().to_vec(),
         payload: payload.to_vec(),
     })
   }
@@ -172,25 +218,25 @@ impl Packet {
     pub fn parse_ip_packet(raw_data: &[u8]) -> Result<Packet, String> {
         match Ipv4HeaderSlice::from_slice(raw_data) {
             Ok(ip_slice) => {
-                let src_ip = ip_slice.source_addr();
-                let dest_ip = ip_slice.destination_addr();
-                let protocol = ip_slice.protocol();
-                let ttl = ip_slice.ttl();
-                let header_checksum = ip_slice.header_checksum();
+              let src_ip = ip_slice.source_addr();
+              let dest_ip = ip_slice.destination_addr();
+              let protocol = ip_slice.protocol();
+              let ttl = ip_slice.ttl();
+              let header_checksum = ip_slice.header_checksum();
 
-                // extract payload
-                let payload_len = ip_slice.payload_len().unwrap_or(0); // default to 0 if the length is not available
-                // start from the end of the IP header and end at the end of the payload
-                let payload = raw_data[ip_slice.slice().len()..ip_slice.slice().len() + payload_len as usize].to_vec();
+              // extract payload
+              let payload_len = ip_slice.payload_len().unwrap_or(0); // default to 0 if the length is not available
+              // start from the end of the IP header and end at the end of the payload
+              let payload = raw_data[ip_slice.slice().len()..ip_slice.slice().len() + payload_len as usize].to_vec();
 
-                Ok(Packet {
-                    src_ip,
-                    dest_ip,
-                    protocol: protocol.0,
-                    payload,
-                    ttl,
-                    header_checksum,
-                })
+              Ok(Packet {
+                  src_ip,
+                  dest_ip,
+                  protocol: protocol.0,
+                  payload,
+                  ttl,
+                  header_checksum,
+              })
             },
             Err(err) => Err(format!("Failed to parse IP packet: {:?}", err)), 
         }
