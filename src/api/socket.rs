@@ -1,6 +1,7 @@
+use std::collections::btree_map::Range;
 use std::hash::Hash;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::Ipv4Addr;
+use std::collections::{HashMap,  VecDeque};
 use std::sync::{Arc, Mutex, Condvar};
 
 use crate::api::packet::{TcpFlags, TcpPacket};
@@ -31,20 +32,41 @@ pub struct TcpListener {
   // A list of sockets for new/pending connections
 
   // This may not need to have Arc Mutex because it is being wrapped in the socket table.
-  pub incoming_connections: Arc<(Mutex<VecDeque<Connection>>, Condvar)>
+  pub incoming_connections: Arc<(Mutex<VecDeque<Connection>>, Condvar)>,
+  pub id: u32
 }
 
 impl TcpListener {
   pub fn clone(&self) -> TcpListener {
     TcpListener { 
-      incoming_connections: Arc::clone(&self.incoming_connections)
+      incoming_connections: Arc::clone(&self.incoming_connections),
+      id: self.id
     }
   }
 
-  pub fn listen() -> TcpListener {
-      TcpListener {
-        incoming_connections: Arc::new((Mutex::new(VecDeque::new()), Condvar::new()))
-      }
+  pub fn listen(tcp: Arc<Mutex<Tcp>>, port: u16) -> Result<TcpListener, String> {
+    // Search for next unique socket_id
+    if let Ok(safe_tcp) = tcp.lock() {
+      let socket_id = safe_tcp.next_unique_id();
+      let tcp_listener = TcpListener {
+        incoming_connections: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+        id: socket_id
+      };
+      
+      let listening_socket = Socket::new(socket_id, SocketStatus::Listening, TcpSocket::Listener(tcp_listener.clone()));
+      
+      // Insert socket into socket table
+      let socket_key = SocketKey {
+          local_ip: None,
+          local_port: Some(port),
+          remote_ip: None,    
+          remote_port: None,
+      };
+      safe_tcp.add_socket(socket_key, listening_socket);
+      println!("Created listen socket with ID {}", socket_id);
+      return Ok(tcp_listener);
+    }
+    return Err("Boo".to_string());
   }
 
   pub fn accept(&self, tcp_clone: Arc<Mutex<Tcp>>) -> Result<Socket, String> {
@@ -53,16 +75,15 @@ impl TcpListener {
     {
       let mut incoming_conns = lock.lock().unwrap();
 
-      // Wait until a connection is available
+      // Wait until a connection is available (receive SYN packet)
       while incoming_conns.is_empty() {
-        println!("waiting....");
         incoming_conns = cvar.wait(incoming_conns).unwrap();
       }
-      println!("I ESCAPED!");
       // Remove and return the first connection
       connection = incoming_conns.pop_front().unwrap();
     }
     
+    let port = connection.socket_key.local_port.unwrap();
     let mut socket_table = Arc::new(Mutex::new(HashMap::new()));
     let mut status_cv = Arc::new((Mutex::new((SocketStatus::Closed, 0, 0)), Condvar::new()));
     if let Ok(tcp) = tcp_clone.lock() {
@@ -70,12 +91,13 @@ impl TcpListener {
       let socket = Socket {
         socket_id: tcp.next_unique_id(),
         status: SocketStatus::SynReceived,
-        tcp_socket: TcpSocket::Stream(TcpStream::new(SocketStatus::SynReceived, connection.seq_num, connection.ack_num + 1))
+        tcp_socket: TcpSocket::Stream(TcpStream::new(SocketStatus::SynReceived, connection.ack_num, connection.seq_num + 1))
       };
-        // Send SYN + ACK packet
-      let syn_ack_packet = TcpPacket::new_syn_ack(connection.socket_key.local_port.unwrap(), 
-      connection.socket_key.remote_port.unwrap(), connection.seq_num, 
-      connection.ack_num + 1);
+      
+      // Send SYN + ACK packet
+      let syn_ack_packet = TcpPacket::new_syn_ack(port, 
+      connection.socket_key.remote_port.unwrap(), connection.ack_num, 
+      connection.seq_num + 1);
       tcp.send_packet(syn_ack_packet, connection.socket_key.remote_ip.unwrap());
       // update socket table
       if let Ok(mut socket_table) = tcp.socket_table.lock() {
@@ -99,10 +121,13 @@ impl TcpListener {
       while *pending_conns != (SocketStatus::Established, connection.seq_num + 1, connection.ack_num + 1) {
         pending_conns = pend_cvar.wait(pending_conns).unwrap();
       }
+      *pending_conns = (SocketStatus::Established, connection.ack_num + 1, connection.seq_num + 1);
     }
     // Update socket table
     if let Ok(mut table) = socket_table.lock() {
-      table.get_mut(&connection.socket_key).unwrap().status = SocketStatus::Established;
+      let mut socket = table.get_mut(&connection.socket_key).unwrap();
+      socket.status = SocketStatus::Established;
+      println!("New connection on socket {} => created new socket {}", self.id, socket.socket_id);
       return Ok(table.get(&connection.socket_key).unwrap().clone());
     } 
     return Err("Boo".to_string());
@@ -110,16 +135,13 @@ impl TcpListener {
 
   pub fn add_connection(&self, connection: Connection) {
     let (lock, cvar) = &*self.incoming_connections;
-    println!("Trying to lock!");
     if let Ok(mut connections) = lock.lock() {
       // Add the new connection
-      println!("added connection!");
       connections.push_back(connection);
     }
     
     // Notify waiting threads that a new connection is available
     cvar.notify_all(); // changed one to all
-    println!("Notified one!");
   }
 
   pub fn close(&self) -> Result<(), String> {
@@ -192,6 +214,9 @@ impl TcpStream {
     // Send SYN packet
     let packet = TcpPacket::new_syn(port, dst_port, seq_num, ack_num);
     let mut status_cv = Arc::new((Mutex::new((SocketStatus::Closed, 0, 0)), Condvar::new()));
+    for i in 0..2 {
+      
+    }
     if let Ok(tcp) = tcp_clone.lock() {
       tcp.send_packet(packet, dst_ip);
       if let Ok(mut socket_table) = tcp.socket_table.lock() {
@@ -207,31 +232,29 @@ impl TcpStream {
       let mut pending_conns = pend_lock.lock().unwrap();
 
       // Wait to receive the SYN + ACK response
-      while *pending_conns != (SocketStatus::Established, seq_num, ack_num + 1) {
-        println!("Waiting....");
+      while *pending_conns != (SocketStatus::Established, ack_num, seq_num + 1) {
         pending_conns = pend_cvar.wait(pending_conns).unwrap();
-        println!("{:?}", pending_conns);
       }
-
-      println!("PEND CVAR WAS RELEASED!!!!");
+      *pending_conns = (SocketStatus::Established, seq_num + 1, ack_num + 1);
     }
 
     // Send ACK packet
-    let packet = TcpPacket::new(port, dst_port, seq_num, ack_num, 
+    let packet = TcpPacket::new(port, dst_port, seq_num + 1, ack_num + 1, 
       TcpFlags::ACK, Vec::new());
     if let Ok(tcp) = tcp_clone.lock() {
       tcp.send_packet(packet, dst_ip);
       // Update socket table
       if let Ok(mut socket_table) = tcp.socket_table.lock() {
-        socket_table.get_mut(&socket_key).unwrap().status = SocketStatus::Established;
+        let socket = socket_table.get_mut(&socket_key).unwrap();
+        socket.status = SocketStatus::Established;
+        if let TcpSocket::Stream(stream) = &socket.tcp_socket {
+          println!("Created new socket with ID {}", socket.socket_id);
+          return Ok(stream.clone());
+        };
       }
     }
-    // create a new normal socket
-
-    // IN TCP STACK if there is no error, add the info to the socket table
-    // TCP STACK will handle creating the actual socket struct, but this function returns the TcpStream itself, which is just part of the struct
     // otherwise, print out an error
-    todo!();
+    return Err("Nope".to_string());
   }
 
   pub fn read(&self, buf: &mut[u8]) -> Result<usize, String> {

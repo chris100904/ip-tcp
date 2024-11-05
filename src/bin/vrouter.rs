@@ -6,7 +6,7 @@ use ip_epa127::api::device::Device;
 use ip_epa127::api::repl::repl;
 use ip_epa127::api::packet::Packet;
 use ip_epa127::api::parser::IPConfig;
-use ip_epa127::api::{CommandType, IPCommand, TCPCommand};
+use ip_epa127::api::{CommandType, IPCommand};
 
 fn main() {
     // use `new` from parse to get the IPConfig
@@ -29,14 +29,6 @@ fn main() {
 
     // get all necessary things and pass it into new
     let router = Arc::new(Mutex::new(Device::new(&ip_config, packet_sender)));
-
-    // Create a channel for communication between the REPL and the Host
-    let (tx, rx) = mpsc::channel();
-
-    // Spawn the REPL in a separate thread
-    std::thread::spawn(move || {
-        repl(tx).unwrap();
-    });
 
     // Create a channel for communication between the REPL and the Host
     let (repl_send, repl_recv) = mpsc::channel();

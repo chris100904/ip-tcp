@@ -88,7 +88,7 @@ pub fn listen_for_commands(ip_send: Sender<IPCommand>, tcp_send: Sender<TCPComma
             }
           }
         }
-        Err(_) => break,
+        Err(_) => {},
       }
   }
 }

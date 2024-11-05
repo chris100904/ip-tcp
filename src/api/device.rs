@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use etherparse::IpNumber;
 
 use super::network_interface::NetworkInterface;
-use super::packet::{self, Entry, Packet, RipPacket};
-use super::routing_table::{NextHop, Route, Table};
+use super::packet::{Entry, Packet, RipPacket};
+use super::routing_table::{NextHop, Table};
 use super::parser::{IPConfig, InterfaceConfig, NeighborConfig, RoutingType, StaticRoute};
 use super::IPCommand;
 
@@ -116,7 +116,7 @@ impl Device {
                         safe_device.process_local_packet(packet);
                       } else if packet.protocol == IpNumber::TCP.0 {
                         if let Some(ref sender) = ip_send_tcp {
-                          sender.send((packet, src_ip));
+                          sender.send((packet, src_ip)).unwrap();
                         }
                       }
                     } else {

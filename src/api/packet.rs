@@ -1,9 +1,7 @@
-use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, PacketBuilder, TcpHeader, TcpHeaderSlice, TcpOptions};
+use etherparse::{IpNumber, Ipv4HeaderSlice, PacketBuilder, TcpHeader, TcpHeaderSlice};
 // use etherparse::checksum::u32_16bit_word;
 use bitflags::bitflags;
-use std::{io::Error, net::Ipv4Addr};
-
-use super::tcp::Tcp;
+use std::net::Ipv4Addr;
 
 #[derive(Debug)]
 pub struct Packet {
@@ -39,7 +37,7 @@ pub struct TcpPacket {
 }
 
 bitflags! {
-  #[derive(Debug, PartialEq)]
+  #[derive(Debug, PartialEq, Clone)]
   pub struct TcpFlags: u8 {
       const SYN = 0b0000_0001;
       const ACK = 0b0000_0010;
@@ -51,17 +49,6 @@ bitflags! {
       // const CWR = 0b1000_0000;
   }
 }
-
-// pub struct TcpFlags {
-//   pub syn: bool,
-//   pub ack: bool,
-//   pub fin: bool,
-//   pub rst: bool,
-//   // pub psh: bool,
-//   // pub urg: bool,
-//   // pub ece: bool,
-//   // pub cwr: bool,
-// }
 #[derive(Debug)]
 pub struct Entry {
   pub cost: u32,
@@ -122,6 +109,19 @@ impl TcpPacket {
         window: 65535, // Default value
         checksum: 0, // Can be blank for now since it gets calculated and replaced later.
         payload,
+    }
+  }
+
+  pub fn clone(&self) -> TcpPacket {
+    TcpPacket {
+        src_port: self.src_port,
+        dest_port: self.dest_port,
+        seq_num: self.seq_num,
+        ack_num: self.ack_num,
+        flags: self.flags.clone(),
+        window: self.window,
+        checksum: self.checksum,
+        payload: self.payload.clone(),
     }
   }
   

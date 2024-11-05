@@ -1,7 +1,5 @@
-use std::{collections::{HashMap, HashSet}, future::pending, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}};
-use std::str::FromStr;
+use std::{collections::{HashMap, HashSet}, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}};
 use std::thread;
-use etherparse::err::tcp;
 use rand::Rng;
 
 use super::{packet::{Packet, TcpFlags, TcpPacket}, socket::{self, Connection, TcpListener, TcpStream}, TCPCommand};
@@ -64,6 +62,24 @@ pub enum SocketStatus {
     LastAck,
 }
 
+impl SocketStatus {
+  pub fn to_string(&self) -> String {
+    match self {
+        SocketStatus::Closed => "",
+        SocketStatus::Listening => "LISTEN",
+        SocketStatus::Established => "ESTABLISHED",
+        SocketStatus::SynSent => "SYN-SENT",
+        SocketStatus::SynReceived => "SYN-RECEIVED",
+        SocketStatus::FinWait1 => "FIN-WAIT1",
+        SocketStatus::FinWait2 => "FIN-WAIT2",
+        SocketStatus::TimeWait => "TIME-WAIT",
+        SocketStatus::Closing => "CLOSING",
+        SocketStatus::ClosedWait => "CLOSED-WAIT",
+        SocketStatus::LastAck => "LAST-ACK",
+    }.to_string()
+  }
+}
+
 // socket struct definition
 #[derive(Clone, Debug)]
 pub struct Socket {
@@ -107,17 +123,14 @@ impl Tcp {
                       TCPCommand::ListenAccept(port) => Tcp::listen_and_accept(tcp_clone, port),
                       TCPCommand::TCPConnect(vip, port) => Tcp::connect(&tcp, vip.parse().unwrap(), port.parse().unwrap()),
                       TCPCommand::ListSockets => {
-                        loop {
-                          if let Ok(mut safe_tcp) = tcp.try_lock() {
-                            safe_tcp.list_sockets();
-                            break;
-                          }
+                        if let Ok(safe_tcp) = tcp.lock() {
+                          safe_tcp.list_sockets();
                         }
                       }
                       ,
-                      TCPCommand::TCPSend(socketId, bytes) => {},// safe_tcp.send_data(&socketId, &data),
-                      TCPCommand::TCPReceive(socketId, numbytes) => {},// safe_tcp.receive_data(&socketId, &numbytes),
-                      TCPCommand::TCPClose(socketId) => {},// safe_tcp.close_socket(&socketId),
+                      TCPCommand::TCPSend(socket_id, bytes) => {},// safe_tcp.send_data(&socketId, &data),
+                      TCPCommand::TCPReceive(socket_id, numbytes) => {},// safe_tcp.receive_data(&socketId, &numbytes),
+                      TCPCommand::TCPClose(socket_id) => {},// safe_tcp.close_socket(&socketId),
                       TCPCommand::SendFile(path, addr, port) => {},// safe_tcp.send_file(&path, Ipv4Addr::from_str(addr).unwrap(), &port.parse().unwrap()),
                       TCPCommand::ReceiveFile(path, port) => {},// safe_tcp.receive_file(&path, &port.parse().unwrap()),
                   }
@@ -128,24 +141,7 @@ impl Tcp {
   }
 
     pub fn listen_and_accept(tcp: Arc<Mutex<Self>>, port: u16) { // -> ListenerHandle {
-        let tcp_listener = TcpListener::listen();
-        // Search for next unique socket_id
-        loop {
-          if let Ok(safe_tcp) = tcp.try_lock() {
-            let socket_id = safe_tcp.next_unique_id();
-            let listening_socket = Socket::new(socket_id, SocketStatus::Listening, TcpSocket::Listener(tcp_listener.clone()));
-        
-            // Insert socket into socket table
-            let socket_key = SocketKey {
-                local_ip: None,
-                local_port: Some(port),
-                remote_ip: None,    
-                remote_port: None,
-            };
-            safe_tcp.add_socket(socket_key, listening_socket);
-            break;
-          }
-        }
+        let tcp_listener = TcpListener::listen(Arc::clone(&tcp), port).unwrap();
         
         let stop_signal = Arc::new((Mutex::new(false), Condvar::new()));
         let stop_signal_clone = Arc::clone(&stop_signal);
@@ -153,8 +149,7 @@ impl Tcp {
         let mut tcp_clone = Arc::clone(&tcp);
         let thread_handle = thread::spawn(move || {
             loop {
-              println!("Listen accept loop");
-                let should_stop = {
+              let should_stop = {
                     let (lock, cvar) = &*stop_signal_clone;
                     let mut stop = lock.lock().unwrap();
                     // while !*stop {
@@ -221,7 +216,6 @@ impl Tcp {
 
     // Receive a packet
     pub fn receive_packet(&mut self, packet: Packet, src_ip: Ipv4Addr) {
-      println!("{:?}", packet);
       let src_ip = packet.src_ip;
       let dest_ip = packet.dest_ip;
       let tcp_packet = TcpPacket::parse_tcp(&packet.payload).unwrap();
@@ -252,7 +246,7 @@ impl Tcp {
                       seq_num: tcp_packet.seq_num,
                       ack_num: tcp_packet.ack_num,
                   };
-                  println!("Adding connection: {:?}", connection);
+                  println!("{:?}", (tcp_packet.ack_num, tcp_packet.seq_num));
                   listen_conn.add_connection(connection); // Safe to call `add_connection` here
               }
             }
@@ -309,18 +303,16 @@ impl Tcp {
     }
 
     pub fn is_listen(&self, port: u16) -> Option<Socket> {
-      loop {
-        if let Ok(socket_table) = self.socket_table.try_lock() {
-          for (socket_key, socket) in socket_table.iter() {
-            if let Some(listen_port) = socket_key.local_port {
-              if listen_port == port && socket.status == SocketStatus::Listening {
-                return Some(socket.clone());
-              }
+      if let Ok(socket_table) = self.socket_table.lock() {
+        for (socket_key, socket) in socket_table.iter() {
+          if let Some(listen_port) = socket_key.local_port {
+            if listen_port == port && socket.status == SocketStatus::Listening {
+              return Some(socket.clone());
             }
           }
-          return None;
         }
       }
+      return None;
     }
 
     pub fn send_packet(&self, packet: TcpPacket, dst_ip: Ipv4Addr) {
@@ -350,14 +342,25 @@ impl Tcp {
 
     pub fn connect(tcp: &Arc<Mutex<Self>>, vip: Ipv4Addr, port: u16) {
       // Create new normal socket
-      let clientConn = TcpStream::connect(Arc::clone(tcp), vip, port).unwrap();
+      let client_conn = TcpStream::connect(Arc::clone(tcp), vip, port).unwrap();
     }
 
     pub fn list_sockets(&self) {
-      println!("SID      LAddr LPort      RAddr RPort       Status");
+      println!("{:<8} {:<10} {:<8} {:<10} {:<8} {}", 
+    "SID", "LAddr", "LPort", "RAddr", "RPort", "Status");
+
       for (socket_key, socket) in self.socket_table.lock().unwrap().iter() {
-        println!("{:?}      {:?}    {:?}        {:?}   {:?}       {:?}", socket.socket_id, socket_key.local_ip, socket_key.local_port, socket_key.remote_ip, socket_key.remote_port, socket.status);
-      }
+          println!(
+              "{:<8} {:<10} {:<8} {:<10} {:<8} {}", 
+              socket.socket_id, 
+              socket_key.local_ip.unwrap_or_else(|| Ipv4Addr::new(0,0,0,0)).to_string(),
+              socket_key.local_port.unwrap_or_else(|| 0), 
+              socket_key.remote_ip.unwrap_or_else(|| Ipv4Addr::new(0,0,0,0)), 
+              socket_key.remote_port.unwrap_or_else(|| 0), 
+              socket.status.to_string()
+          );
+}
+
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////////
