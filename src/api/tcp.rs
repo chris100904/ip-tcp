@@ -342,7 +342,7 @@ impl Tcp {
 
     pub fn connect(tcp: &Arc<Mutex<Self>>, vip: Ipv4Addr, port: u16) {
       // Create new normal socket
-      let client_conn = TcpStream::connect(Arc::clone(tcp), vip, port).unwrap();
+      let client_conn = TcpStream::connect(Arc::clone(tcp), vip, port).expect("oops");
     }
 
     pub fn list_sockets(&self) {

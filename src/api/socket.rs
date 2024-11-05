@@ -2,7 +2,10 @@ use std::collections::btree_map::Range;
 use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap,  VecDeque};
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
+use std::time::{Duration, Instant};
+
+use chrono::Local;
 
 use crate::api::packet::{TcpFlags, TcpPacket};
 use crate::api::tcp::{SocketKey, SocketStatus, TcpSocket};
@@ -214,11 +217,8 @@ impl TcpStream {
     // Send SYN packet
     let packet = TcpPacket::new_syn(port, dst_port, seq_num, ack_num);
     let mut status_cv = Arc::new((Mutex::new((SocketStatus::Closed, 0, 0)), Condvar::new()));
-    for i in 0..2 {
-      
-    }
     if let Ok(tcp) = tcp_clone.lock() {
-      tcp.send_packet(packet, dst_ip);
+      tcp.send_packet(packet.clone(), dst_ip);
       if let Ok(mut socket_table) = tcp.socket_table.lock() {
         socket_table.insert(socket_key.clone(), socket);
         if let TcpSocket::Stream(stream) = &socket_table.get_mut(&socket_key).unwrap().tcp_socket{
@@ -227,15 +227,37 @@ impl TcpStream {
       }
     }
 
-    {
+    for i in 0..4 {
       let (pend_lock, pend_cvar) = &*status_cv;
       let mut pending_conns = pend_lock.lock().unwrap();
+      let mut timeout_result: Option<WaitTimeoutResult> = None;
 
       // Wait to receive the SYN + ACK response
-      while *pending_conns != (SocketStatus::Established, ack_num, seq_num + 1) {
-        pending_conns = pend_cvar.wait(pending_conns).unwrap();
+      if *pending_conns != (SocketStatus::Established, ack_num, seq_num + 1) {
+        (pending_conns, timeout_result) = pend_cvar.wait_timeout(pending_conns, Duration::from_secs(2 + 2 * i))
+        .map(|result| {
+          (result.0, Some(result.1))
+        }).unwrap();
       }
-      *pending_conns = (SocketStatus::Established, seq_num + 1, ack_num + 1);
+
+      if let Some(result) = timeout_result {
+        if !result.timed_out() {
+          *pending_conns = (SocketStatus::Established, seq_num + 1, ack_num + 1);
+          break;
+        } else {
+          if let Ok(tcp) = tcp_clone.lock() {
+            if i == 3 {
+              if let Ok(mut socket_table) = tcp.socket_table.lock() {
+                socket_table.remove(&socket_key);
+                eprintln!("Connect error: destination port does not exist.");
+                return Err("Connect error: destination port does not exist.".to_string());
+              }
+            }
+            eprintln!("{}  warn Connect retry attempt {}", Local::now().format("%Y-%m-%d %H:%M:%S"), i + 1);
+            tcp.send_packet(packet.clone(), dst_ip);
+          }
+        }
+      }
     }
 
     // Send ACK packet
