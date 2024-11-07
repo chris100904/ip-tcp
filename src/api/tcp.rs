@@ -215,7 +215,7 @@ impl Tcp {
     }
 
     // Receive a packet
-    pub fn receive_packet(&mut self, packet: Packet, src_ip: Ipv4Addr) {
+    pub fn receive_packet(&mut self, packet: Packet, src_ip: Ipv4Addr) -> Result<(), String> {
       let src_ip = packet.src_ip;
       let dest_ip = packet.dest_ip;
       let tcp_packet = TcpPacket::parse_tcp(&packet.payload).unwrap();
@@ -225,14 +225,14 @@ impl Tcp {
         local_port: Some(tcp_packet.dest_port),
         remote_ip: Some(src_ip),
         remote_port: Some(tcp_packet.src_port),
-    };
+      };
 
-    println!("{:?}", tcp_packet.flags);
+      println!("{:?}", tcp_packet.flags);
       match tcp_packet.flags {
         flag if flag == TcpFlags::SYN => {
           // Check if tcp_packet.dst_port is a LISTEN port (src_port in socket table)
           if let Some(listen_socket) = self.is_listen(tcp_packet.dest_port) {
-            if let TcpSocket::Listener(ref listen_conn) = listen_socket.tcp_socket {
+            Ok(if let TcpSocket::Listener(ref listen_conn) = listen_socket.tcp_socket {
               // Acquire lock to check for existing connection
               let already_exists = {
                   let incoming_connections = listen_conn.incoming_connections.0.lock().unwrap();
@@ -249,12 +249,15 @@ impl Tcp {
                   println!("{:?}", (tcp_packet.ack_num, tcp_packet.seq_num));
                   listen_conn.add_connection(connection); // Safe to call `add_connection` here
               }
-            }
+            })
+          } else {
+            // If not, drop the packet.
+            return Err("No listening socket found".to_string());
           }
         },
         flag if flag == TcpFlags::SYN | TcpFlags::ACK => {
           // Check if connection is already in the socket table and has status SYN-SENT
-          if let Some(socket) = self.get_socket(socket_key) {
+          Ok(if let Some(socket) = self.get_socket(socket_key) {
             if socket.status == SocketStatus::SynSent {
               // If so, then proceed with connect (send the ACK) and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
@@ -263,14 +266,18 @@ impl Tcp {
 
                 // Notify waiting threads that a new connection is available
                 cvar.notify_all(); // changed one to all
+              } else {
+                return Err("Invalid socket status".to_string());
               }
+            } else {
+              return Err("No socket found".to_string());
             }
-          }
+          })
           // If not, drop the packet.
         },
         flag if flag == TcpFlags::ACK => {
           // Check if connection is already in the socket table and has status SYN-RECEIVED
-          if let Some(socket) = self.get_socket(socket_key) {
+          Ok(if let Some(socket) = self.get_socket(socket_key) {
             if socket.status == SocketStatus::SynReceived {
               // If so, then finish accept() and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
@@ -280,24 +287,41 @@ impl Tcp {
                 }
                 // Notify waiting threads that a new connection is available
                 cvar.notify_all(); // changed one to all
+              } else {
+                return Err("Invalid socket status".to_string());
               }
-            }
+            } 
             // Other valid statuses: FIN-WAIT1, CLOSING, LAST-ACK
-          }
+            else if socket.status == SocketStatus::FinWait1 {
+              todo!()
+            } else if socket.status == SocketStatus::Closing {
+              todo!()
+            } else if socket.status == SocketStatus::LastAck {
+              todo!()
+            } else {
+              // If not, drop the packet.
+              return Err("No socket found".to_string());
+            }
+            
+          })
         },
         flag if flag == TcpFlags::RST => {
           // Should terminate the connection
+          todo!()
         },
         flag if flag == TcpFlags::FIN => {
           // Check if connection is already in the socket table
           // Valid statuses: ESTABLISHED, FIN-WAIT1, FIN-WAIT2
+          todo!()
         },
         flag if flag == TcpFlags::FIN | TcpFlags::ACK => {
           // Check if connection is already in the socket table
           // Valid statuses: FIN-WAIT1
+          todo!()
         },
         _ => {
           // Drop the packet
+          return Err("Dropped packet with unknown flags".to_string());
         }
       }
     }

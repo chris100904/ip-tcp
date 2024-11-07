@@ -115,7 +115,13 @@ impl TcpListener {
       if let Ok(mut socket_table) = socket_table.lock() {
         if let TcpSocket::Stream(stream) = &socket_table.get_mut(&connection.socket_key).unwrap().tcp_socket{
           status_cv = Arc::clone(&stream.status);
+        } else {
+          // Should never happen (?)
+          return Err("Boo1".to_string());
         }
+      } else {
+        // Missing socket, should also not happen? 
+        return Err("Boo2".to_string());
       }
       let (pend_lock, pend_cvar) = &*status_cv;
       let mut pending_conns = pend_lock.lock().unwrap();
@@ -132,8 +138,9 @@ impl TcpListener {
       socket.status = SocketStatus::Established;
       println!("New connection on socket {} => created new socket {}", self.id, socket.socket_id);
       return Ok(table.get(&connection.socket_key).unwrap().clone());
-    } 
-    return Err("Boo".to_string());
+    } else {
+      return Err("Boo3".to_string());
+    }
   }
 
   pub fn add_connection(&self, connection: Connection) {
@@ -196,6 +203,8 @@ impl TcpStream {
       port = tcp.get_port();
       socket_id = tcp.next_unique_id();
       src_ip = tcp.src_ip;
+    } else {
+      return Err("Tcp::connect unable to lock tcp_clone".to_string());
     }
 
     let seq_num = Tcp::gen_rand_u32();
@@ -223,8 +232,14 @@ impl TcpStream {
         socket_table.insert(socket_key.clone(), socket);
         if let TcpSocket::Stream(stream) = &socket_table.get_mut(&socket_key).unwrap().tcp_socket{
           status_cv = Arc::clone(&stream.status);
+        } else {
+          return Err("Tcp::connect unable to get stream from socket".to_string());
         }
+      } else {
+        return Err("Tcp::connect unable to lock socket_table".to_string());
       }
+    } else {
+      return Err("Tcp::connect unable to lock tcp_clone".to_string());
     }
 
     for i in 0..4 {
