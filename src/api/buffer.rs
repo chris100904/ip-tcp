@@ -25,8 +25,34 @@ impl CircularBuffer {
         self.base_seq.wrapping_add(index as u32)
     }
 
+    // Write data to the circular buffer.
+    //
+    // Returns the number of bytes written to the buffer. If the buffer is full,
+    // this function will return early and not write all of the provided data.
+    //
     pub fn write(&mut self, data: &[u8]) -> usize {
-        todo!()
+        let mut bytes_written = 0;
+        for &byte in data {
+            if self.is_full() {
+                break;
+            }
+            self.buffer[self.end] = byte;
+            self.end = (self.end + 1) % self.capacity;
+            bytes_written += 1;
+        }
+        bytes_written
+    }
+
+    // Returns all of the bytes in the circular buffer and clears the buffer.
+    //
+    // This method is useful for reading all of the data from the buffer at once.
+    pub fn read_all(&mut self) -> Vec<u8> {
+        let mut data = Vec::new();
+        while !self.is_empty() {
+            data.push(self.buffer[self.start]);
+            self.start = (self.start + 1) % self.capacity;
+        }
+        data
     }
 
     pub fn read(&mut self, len: usize) -> Vec<u8> {
