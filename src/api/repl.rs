@@ -1,7 +1,7 @@
 use rustyline::{DefaultEditor, Result};
-use std::sync::mpsc::Sender;
+use std::{net::Ipv4Addr, sync::mpsc::Sender};
 
-use super::{CommandType, IPCommand, TCPCommand};
+use super::{error::TcpError, CommandType, IPCommand, TCPCommand};
 
 pub fn repl(sender: Sender<CommandType>) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
@@ -49,11 +49,33 @@ pub fn repl(sender: Sender<CommandType>) -> Result<()> {
                         }
                     }
                     "c" => {
-                        if args.len() == 3 {
-                            sender.send(CommandType::TCP(TCPCommand::TCPConnect(args[1].to_string(), args[2].to_string()))).unwrap();
-                        } else {
+                      if args.len() < 3 {
+                        println!("Usage: c <vip> <port>");
+                      }
+                      // Attempt to parse the virtual IP and port
+                      let connect: std::result::Result<(Ipv4Addr, u16), TcpError> = (||
+                        Ok((args[1].parse().map_err(|_| {
+                            println!("Invalid virtual IP: {}", args[1]);
+                            TcpError::ReplError { message: "Invalid virtual IP".to_string() }
+                        })?,
+                        args[2].parse().map_err(|_| {
+                            println!("Invalid port: {}", args[2]);
+                            TcpError::ReplError { message: "Invalid port".to_string() }
+                        })?))
+                      )();
+                  
+                      match connect {
+                        Ok((vip, port)) => {
+                            // If parsing was successful, send the command
+                            sender
+                                .send(CommandType::TCP(TCPCommand::TCPConnect(vip, port)))
+                                .unwrap();
+                        }
+                        Err(_) => {
+                            // In case of an error, show usage information
                             println!("Usage: c <vip> <port>");
                         }
+                    }
                     }
                     "s" => {
                         if args.len() == 3 {

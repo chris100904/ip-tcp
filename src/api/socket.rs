@@ -1,15 +1,13 @@
-use std::collections::btree_map::Range;
 use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap,  VecDeque};
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
-use std::time::{Duration, Instant};
-
+use std::time::Duration;
 use chrono::Local;
-
 use crate::api::packet::{TcpFlags, TcpPacket};
 use crate::api::tcp::{SocketKey, SocketStatus, TcpSocket};
 
+use super::error::TcpError;
 use super::tcp::{Socket, Tcp};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
@@ -47,9 +45,10 @@ impl TcpListener {
     }
   }
 
-  pub fn listen(tcp: Arc<Mutex<Tcp>>, port: u16) -> Result<TcpListener, String> {
+  pub fn listen(tcp: Arc<Mutex<Tcp>>, port: u16) -> Result<TcpListener, TcpError> {
     // Search for next unique socket_id
-    if let Ok(safe_tcp) = tcp.lock() {
+    {
+      let safe_tcp = tcp.lock().unwrap();
       let socket_id = safe_tcp.next_unique_id();
       let tcp_listener = TcpListener {
         incoming_connections: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
@@ -69,10 +68,9 @@ impl TcpListener {
       println!("Created listen socket with ID {}", socket_id);
       return Ok(tcp_listener);
     }
-    return Err("Boo".to_string());
   }
 
-  pub fn accept(&self, tcp_clone: Arc<Mutex<Tcp>>) -> Result<Socket, String> {
+  pub fn accept(&self, tcp_clone: Arc<Mutex<Tcp>>) -> Result<Socket, TcpError> {
     let (lock, cvar) = &*self.incoming_connections;
     let connection;
     {
@@ -86,10 +84,20 @@ impl TcpListener {
       connection = incoming_conns.pop_front().unwrap();
     }
     
-    let port = connection.socket_key.local_port.unwrap();
-    let mut socket_table = Arc::new(Mutex::new(HashMap::new()));
-    let mut status_cv = Arc::new((Mutex::new((SocketStatus::Closed, 0, 0)), Condvar::new()));
-    if let Ok(tcp) = tcp_clone.lock() {
+    let port = connection.socket_key.local_port
+      .ok_or(TcpError::ConnectionError { message: "Local port not found".to_string() })?;
+    let dest_port = connection.socket_key.remote_port
+      .ok_or(TcpError::ConnectionError { 
+        message: "Connection remote port not found".to_string() 
+      })?;
+    let dst_ip = connection.socket_key.remote_ip
+      .ok_or(TcpError::ConnectionError { 
+        message: "Connection remote ip not found".to_string() 
+      })?;
+    let socket_table;
+    let status_cv;
+    {
+      let tcp = tcp_clone.lock().unwrap();
       // Create normal socket with this socket connection
       let socket = Socket {
         socket_id: tcp.next_unique_id(),
@@ -99,11 +107,11 @@ impl TcpListener {
       
       // Send SYN + ACK packet
       let syn_ack_packet = TcpPacket::new_syn_ack(port, 
-      connection.socket_key.remote_port.unwrap(), connection.ack_num, 
-      connection.seq_num + 1);
-      tcp.send_packet(syn_ack_packet, connection.socket_key.remote_ip.unwrap());
+      dest_port, connection.ack_num, connection.seq_num + 1);
+      tcp.send_packet(syn_ack_packet, dst_ip);
       // update socket table
-      if let Ok(mut socket_table) = tcp.socket_table.lock() {
+      {
+        let mut socket_table = tcp.socket_table.lock().unwrap();
         socket_table.insert(connection.socket_key.clone(), socket);
       }
 
@@ -112,42 +120,46 @@ impl TcpListener {
     }
 
     {
-      if let Ok(mut socket_table) = socket_table.lock() {
-        if let TcpSocket::Stream(stream) = &socket_table.get_mut(&connection.socket_key).unwrap().tcp_socket{
+      {
+        let mut socket_table = socket_table.lock().unwrap();
+        if let TcpSocket::Stream(stream) = &socket_table.get_mut(&connection.socket_key).unwrap().tcp_socket {
           status_cv = Arc::clone(&stream.status);
         } else {
-          // Should never happen (?)
-          return Err("Boo1".to_string());
+          // Socket not found
+          return Err(TcpError::ListenerError { 
+            message: "Socket table contained TcpListener rather than TcpStream.".to_string() 
+          });
         }
-      } else {
-        // Missing socket, should also not happen? 
-        return Err("Boo2".to_string());
       }
       let (pend_lock, pend_cvar) = &*status_cv;
       let mut pending_conns = pend_lock.lock().unwrap();
 
       // Wait to receive the ACK response
       while *pending_conns != (SocketStatus::Established, connection.seq_num + 1, connection.ack_num + 1) {
-        pending_conns = pend_cvar.wait(pending_conns).unwrap();
+        pending_conns = pend_cvar.wait(pending_conns).unwrap(); 
       }
       *pending_conns = (SocketStatus::Established, connection.ack_num + 1, connection.seq_num + 1);
     }
-    // Update socket table
-    if let Ok(mut table) = socket_table.lock() {
-      let mut socket = table.get_mut(&connection.socket_key).unwrap();
+
+    let result = {
+      let mut table = socket_table.lock().unwrap();
+      let socket = table.get_mut(&connection.socket_key).ok_or(
+        TcpError::ListenerError { 
+          message: "Socket key not found in table.".to_string() 
+        })?;
+      // Your operations on `socket` here
       socket.status = SocketStatus::Established;
-      println!("New connection on socket {} => created new socket {}", self.id, socket.socket_id);
-      return Ok(table.get(&connection.socket_key).unwrap().clone());
-    } else {
-      return Err("Boo3".to_string());
-    }
+      Ok(socket.clone())
+    };
+  result
   }
 
   pub fn add_connection(&self, connection: Connection) {
     let (lock, cvar) = &*self.incoming_connections;
-    if let Ok(mut connections) = lock.lock() {
+    { 
+      let mut connections = lock.lock().unwrap();
       // Add the new connection
-      connections.push_back(connection);
+      connections.push_back(connection); 
     }
     
     // Notify waiting threads that a new connection is available
@@ -194,17 +206,16 @@ impl TcpStream {
       write_buffer: self.write_buffer.clone() 
     }
   }
-  pub fn connect(tcp_clone: Arc<Mutex<Tcp>>, dst_ip: Ipv4Addr, dst_port: u16) -> Result<TcpStream, String> {
+  pub fn connect(tcp_clone: Arc<Mutex<Tcp>>, dst_ip: Ipv4Addr, dst_port: u16) -> Result<TcpStream, TcpError> {
     // Choose random available src_port
-    let mut port= 0;
-    let mut src_ip = Ipv4Addr::new(0,0,0,0) ;
-    let mut socket_id = 0;
-    if let Ok(tcp) = tcp_clone.lock() {
+    let port;
+    let src_ip;
+    let socket_id;
+   {
+      let tcp = tcp_clone.lock().unwrap();
       port = tcp.get_port();
       socket_id = tcp.next_unique_id();
       src_ip = tcp.src_ip;
-    } else {
-      return Err("Tcp::connect unable to lock tcp_clone".to_string());
     }
 
     let seq_num = Tcp::gen_rand_u32();
@@ -225,21 +236,19 @@ impl TcpStream {
 
     // Send SYN packet
     let packet = TcpPacket::new_syn(port, dst_port, seq_num, ack_num);
-    let mut status_cv = Arc::new((Mutex::new((SocketStatus::Closed, 0, 0)), Condvar::new()));
-    if let Ok(tcp) = tcp_clone.lock() {
+    let status_cv ;
+    {
+      let tcp = tcp_clone.lock().unwrap();
       tcp.send_packet(packet.clone(), dst_ip);
-      if let Ok(mut socket_table) = tcp.socket_table.lock() {
+      {
+        let mut socket_table = tcp.socket_table.lock().unwrap();
         socket_table.insert(socket_key.clone(), socket);
-        if let TcpSocket::Stream(stream) = &socket_table.get_mut(&socket_key).unwrap().tcp_socket{
+        if let TcpSocket::Stream(stream) = &socket_table.get_mut(&socket_key).unwrap().tcp_socket { // TODO
           status_cv = Arc::clone(&stream.status);
         } else {
-          return Err("Tcp::connect unable to get stream from socket".to_string());
+          return Err(TcpError::StreamError { message: "Tcp::connect unable to get stream from socket".to_string() });
         }
-      } else {
-        return Err("Tcp::connect unable to lock socket_table".to_string());
       }
-    } else {
-      return Err("Tcp::connect unable to lock tcp_clone".to_string());
     }
 
     for i in 0..4 {
@@ -260,17 +269,16 @@ impl TcpStream {
           *pending_conns = (SocketStatus::Established, seq_num + 1, ack_num + 1);
           break;
         } else {
-          if let Ok(tcp) = tcp_clone.lock() {
-            if i == 3 {
-              if let Ok(mut socket_table) = tcp.socket_table.lock() {
-                socket_table.remove(&socket_key);
-                eprintln!("Connect error: destination port does not exist.");
-                return Err("Connect error: destination port does not exist.".to_string());
-              }
+          let tcp = tcp_clone.lock().unwrap();
+          if i == 3 {
+            if let Ok(mut socket_table) = tcp.socket_table.lock() {
+              socket_table.remove(&socket_key);
+              eprintln!("Connect error: destination port does not exist.");
+              return Err(TcpError::StreamError { message: "Connect error: destination port does not exist.".to_string() });
             }
-            eprintln!("{}  warn Connect retry attempt {}", Local::now().format("%Y-%m-%d %H:%M:%S"), i + 1);
-            tcp.send_packet(packet.clone(), dst_ip);
           }
+          eprintln!("{}  warn Connect retry attempt {}", Local::now().format("%Y-%m-%d %H:%M:%S"), i + 1);
+          tcp.send_packet(packet.clone(), dst_ip);
         }
       }
     }
@@ -278,33 +286,36 @@ impl TcpStream {
     // Send ACK packet
     let packet = TcpPacket::new(port, dst_port, seq_num + 1, ack_num + 1, 
       TcpFlags::ACK, Vec::new());
-    if let Ok(tcp) = tcp_clone.lock() {
+    {
+      let tcp = tcp_clone.lock().unwrap();
       tcp.send_packet(packet, dst_ip);
       // Update socket table
-      if let Ok(mut socket_table) = tcp.socket_table.lock() {
-        let socket = socket_table.get_mut(&socket_key).unwrap();
-        socket.status = SocketStatus::Established;
-        if let TcpSocket::Stream(stream) = &socket.tcp_socket {
-          println!("Created new socket with ID {}", socket.socket_id);
-          return Ok(stream.clone());
-        };
-      }
+      let mut socket_table = tcp.socket_table.lock().unwrap();
+      let socket = socket_table.get_mut(&socket_key).ok_or(
+        TcpError::StreamError { message: "Could not retrieve TcpStream from socket table.".to_string() }
+      )?; // TODO
+      socket.status = SocketStatus::Established;
+      if let TcpSocket::Stream(stream) = &socket.tcp_socket {
+        println!("Created new socket with ID {}", socket.socket_id);
+        return Ok(stream.clone());
+      };
     }
-    // otherwise, print out an error
-    return Err("Nope".to_string());
+    return Err(TcpError::StreamError {
+      message: "Could not complete connect.".to_string()
+    });
   }
 
-  pub fn read(&self, buf: &mut[u8]) -> Result<usize, String> {
+  pub fn read(&self, buf: &mut[u8]) -> Result<usize, TcpError> {
       // TODO: Implement TCP reading
       unimplemented!();
   }
 
-  pub fn write(&self, buf: &[u8]) -> Result<usize, String> {
+  pub fn write(&self, buf: &[u8]) -> Result<usize, TcpError> {
       // TODO: Implement TCP writing
       unimplemented!();
   }   
 
-  pub fn close(&self) -> Result<(), String> {
+  pub fn close(&self) -> Result<(), TcpError> {
       // TODO: Implement TCP closing
       unimplemented!();
   }

@@ -157,7 +157,7 @@ impl TcpPacket {
     let mut result: Vec<u8> = Vec::with_capacity(tcp_header.header_len() as usize + self.payload.len());
 
     // Write the TCP header into the buffer
-    tcp_header.write(&mut result);
+    tcp_header.write(&mut result); // TODO
 
     // Append the TCP payload
     result.extend_from_slice(&self.payload);
@@ -176,8 +176,6 @@ impl TcpPacket {
 
     // Extract payload
     let payload = &raw_data[header_len..];
-
-
 
     // TODO: Validations? (Flags, checksum)
     Ok(TcpPacket {

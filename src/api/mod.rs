@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 pub mod network_interface;
 pub mod packet;
 pub mod parser;
@@ -6,6 +8,7 @@ pub mod routing_table;
 pub mod device;
 pub mod socket;
 pub mod tcp;
+pub mod error;
 
 pub enum CommandType {
   IP(IPCommand),
@@ -23,7 +26,7 @@ pub enum IPCommand {
 
 pub enum TCPCommand {
   ListenAccept(u16),
-  TCPConnect(String, String),
+  TCPConnect(Ipv4Addr, u16),
   TCPSend(u32, String),
   TCPReceive(u32, u32),
   TCPClose(u32),
