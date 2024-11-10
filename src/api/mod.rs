@@ -9,6 +9,7 @@ pub mod device;
 pub mod socket;
 pub mod tcp;
 pub mod error;
+pub mod buffer;
 
 pub enum CommandType {
   IP(IPCommand),
