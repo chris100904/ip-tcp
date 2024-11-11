@@ -7,6 +7,7 @@ use chrono::Local;
 use crate::api::packet::{TcpFlags, TcpPacket};
 use crate::api::tcp::{SocketKey, SocketStatus, TcpSocket};
 
+use super::buffer::CircularBuffer;
 use super::error::TcpError;
 use super::tcp::{Socket, Tcp};
 
@@ -172,6 +173,10 @@ impl TcpListener {
   }
 }
 
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+// TcpStream FUNCTIONS
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
 #[derive(Clone, Debug)]
 pub struct TcpStream {
   // May not need to be arc mutexed.
@@ -179,12 +184,17 @@ pub struct TcpStream {
   pub status: Arc<(Mutex<(SocketStatus, u32, u32)>, Condvar)>,
   // TODO: add a TcpStream struct to hold the TcpStream object    
   // A buffer for reading data
-  pub read_buffer: Vec<u8>,
+  pub send_buffer: CircularBuffer,
     
   // A buffer for writing data
-  pub write_buffer: Vec<u8>,
+  pub receive_buffer: CircularBuffer,
   // Initial sequence number
   // buffer pointers
+  pub send_una: u32,
+  pub send_nxt: u32,
+  pub send_wnd: u16,
+  pub receive_next: u32,
+  pub receive_wnd: u16,
   // In the sending case, you might consider keeping track of what packets 
   // you've sent and the timings for those in order to support retransmission 
   // later on, and in the receiving case, you'll need to handle receiving packets out of order.
@@ -194,16 +204,26 @@ impl TcpStream {
   pub fn new(status: SocketStatus, seq_num: u32, ack_num: u32) -> TcpStream {
     TcpStream { 
       status: Arc::new((Mutex::new((status, seq_num, ack_num)), Condvar::new())),
-      read_buffer: Vec::new(), 
-      write_buffer: Vec::new() 
+      send_buffer: CircularBuffer::new(), 
+      receive_buffer: CircularBuffer::new(),
+      send_nxt: 0,
+      send_una: 0,
+      send_wnd: 0,
+      receive_next: 0,
+      receive_wnd: 0,
     }
   }
 
   pub fn clone(&self) -> TcpStream {
     TcpStream { 
       status: Arc::clone(&self.status),
-      read_buffer: self.read_buffer.clone(), 
-      write_buffer: self.write_buffer.clone() 
+      send_buffer: self.send_buffer.clone(), 
+      receive_buffer: self.receive_buffer.clone() ,
+      send_nxt: self.send_nxt,
+      send_una: self.send_una,
+      send_wnd: self.send_wnd,
+      receive_next: self.receive_next,
+      receive_wnd: self.receive_wnd,
     }
   }
   pub fn connect(tcp_clone: Arc<Mutex<Tcp>>, dst_ip: Ipv4Addr, dst_port: u16) -> Result<TcpStream, TcpError> {

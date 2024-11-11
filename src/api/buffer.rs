@@ -1,3 +1,6 @@
+pub const BUFFER_SIZE: usize = 65536;
+
+#[derive(Clone, Debug)]
 pub struct CircularBuffer {
     buffer: Vec<u8>,
     capacity: usize,
@@ -7,14 +10,24 @@ pub struct CircularBuffer {
 }
 
 impl CircularBuffer {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new() -> Self {
         CircularBuffer {
-            buffer: vec![0; capacity],
-            capacity, 
+            buffer: vec![0; BUFFER_SIZE],
+            capacity: BUFFER_SIZE, 
             base_seq: 0,
             start: 0,
             end: 0,
         }
+    }
+
+    pub fn clone(&self) -> CircularBuffer {
+      CircularBuffer {
+        buffer: self.buffer.clone(),
+        capacity: self.capacity,
+        base_seq: self.base_seq,
+        start: self.start,
+        end: self.end,
+      }
     }
 
     pub fn seq_to_index(&self, seq: u32) -> usize {
