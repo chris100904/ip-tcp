@@ -2,20 +2,24 @@ use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap,  VecDeque};
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 use chrono::Local;
 use crate::api::packet::{TcpFlags, TcpPacket};
 use crate::api::tcp::{SocketKey, SocketStatus, TcpSocket};
 
-use super::buffer::CircularBuffer;
+use super::buffer::{CircularBuffer, ReceiveBuffer, SendBuffer};
 use super::error::TcpError;
 use super::tcp::{Socket, Tcp};
+
+pub const MAX_SEGMENT_SIZE: usize = 536;
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 pub struct Connection {
   pub socket_key: SocketKey,
   pub seq_num: u32,
-  pub ack_num: u32
+  pub ack_num: u32,
+  pub window: u16,
 }
 
 impl Connection {
@@ -23,7 +27,8 @@ impl Connection {
     Connection {
       socket_key: self.socket_key.clone(),
       seq_num: self.seq_num.clone(),
-      ack_num: self.ack_num.clone()
+      ack_num: self.ack_num.clone(),
+      window: self.window.clone(),
     }
   }
 }
@@ -87,7 +92,7 @@ impl TcpListener {
     
     let port = connection.socket_key.local_port
       .ok_or(TcpError::ConnectionError { message: "Local port not found".to_string() })?;
-    let dest_port = connection.socket_key.remote_port
+    let dst_port = connection.socket_key.remote_port
       .ok_or(TcpError::ConnectionError { 
         message: "Connection remote port not found".to_string() 
       })?;
@@ -103,12 +108,17 @@ impl TcpListener {
       let socket = Socket {
         socket_id: tcp.next_unique_id(),
         status: SocketStatus::SynReceived,
-        tcp_socket: TcpSocket::Stream(TcpStream::new(SocketStatus::SynReceived, connection.ack_num, connection.seq_num + 1))
+        tcp_socket: TcpSocket::Stream(
+          TcpStream::new(
+            SocketStatus::SynReceived, 
+            connection.ack_num, 
+            connection.seq_num + 1, 
+            connection.socket_key.clone()))
       };
       
       // Send SYN + ACK packet
       let syn_ack_packet = TcpPacket::new_syn_ack(port, 
-      dest_port, connection.ack_num, connection.seq_num + 1);
+      dst_port, connection.ack_num, connection.seq_num + 1);
       tcp.send_packet(syn_ack_packet, dst_ip);
       // update socket table
       {
@@ -136,10 +146,12 @@ impl TcpListener {
       let mut pending_conns = pend_lock.lock().unwrap();
 
       // Wait to receive the ACK response
-      while *pending_conns != (SocketStatus::Established, connection.seq_num + 1, connection.ack_num + 1) {
+      while !(pending_conns.0 == SocketStatus::Established 
+        && pending_conns.1 == connection.seq_num + 1
+        && pending_conns.2 == connection.ack_num + 1) {
         pending_conns = pend_cvar.wait(pending_conns).unwrap(); 
       }
-      *pending_conns = (SocketStatus::Established, connection.ack_num + 1, connection.seq_num + 1);
+      *pending_conns = (SocketStatus::Established, connection.ack_num + 1, connection.seq_num + 1, connection.window);
     }
 
     let result = {
@@ -176,54 +188,50 @@ impl TcpListener {
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 // TcpStream FUNCTIONS
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
+#[derive(Clone, Debug)]
+pub struct RetransmissionEntry {
+  seq_num: u32,
+  data: Vec<u8>,
+  timestamp: Instant,
+  retries: u32, 
+}
+
 #[derive(Clone, Debug)]
 pub struct TcpStream {
   // May not need to be arc mutexed.
   // Represents SocketStatus, seq_num, ack_num
-  pub status: Arc<(Mutex<(SocketStatus, u32, u32)>, Condvar)>,
+  pub status: Arc<(Mutex<(SocketStatus, u32, u32, u16)>, Condvar)>,
+  pub socket_key: SocketKey,
   // TODO: add a TcpStream struct to hold the TcpStream object    
   // A buffer for reading data
-  pub send_buffer: CircularBuffer,
-    
+  pub send_buffer: Arc<(Mutex<SendBuffer>, Condvar)>,  
   // A buffer for writing data
-  pub receive_buffer: CircularBuffer,
-  // Initial sequence number
-  // buffer pointers
-  pub send_una: u32,
-  pub send_nxt: u32,
-  pub send_wnd: u16,
-  pub receive_next: u32,
-  pub receive_wnd: u16,
+  pub receive_buffer: Arc<(Mutex<ReceiveBuffer>, Condvar)>,
   // In the sending case, you might consider keeping track of what packets 
   // you've sent and the timings for those in order to support retransmission 
   // later on, and in the receiving case, you'll need to handle receiving packets out of order.
+  
+  pub retransmission_queue: Arc<Mutex<VecDeque<RetransmissionEntry>>>,
 }
 
-impl TcpStream {
-  pub fn new(status: SocketStatus, seq_num: u32, ack_num: u32) -> TcpStream {
+impl TcpStream { 
+  pub fn new(status: SocketStatus, seq_num: u32, ack_num: u32, socket_key: SocketKey) -> TcpStream {
     TcpStream { 
-      status: Arc::new((Mutex::new((status, seq_num, ack_num)), Condvar::new())),
-      send_buffer: CircularBuffer::new(), 
-      receive_buffer: CircularBuffer::new(),
-      send_nxt: 0,
-      send_una: 0,
-      send_wnd: 0,
-      receive_next: 0,
-      receive_wnd: 0,
+      status: Arc::new((Mutex::new((status, seq_num, ack_num, 0)), Condvar::new())),
+      socket_key,
+      send_buffer: Arc::new((Mutex::new(SendBuffer::new()), Condvar::new())), 
+      receive_buffer: Arc::new((Mutex::new(ReceiveBuffer::new()), Condvar::new())), 
+      retransmission_queue: Arc::new(Mutex::new(VecDeque::new())),
     }
   }
 
   pub fn clone(&self) -> TcpStream {
     TcpStream { 
       status: Arc::clone(&self.status),
+      socket_key: self.socket_key.clone(),
       send_buffer: self.send_buffer.clone(), 
-      receive_buffer: self.receive_buffer.clone() ,
-      send_nxt: self.send_nxt,
-      send_una: self.send_una,
-      send_wnd: self.send_wnd,
-      receive_next: self.receive_next,
-      receive_wnd: self.receive_wnd,
+      receive_buffer: self.receive_buffer.clone(),
+      retransmission_queue: self.retransmission_queue.clone(),
     }
   }
   pub fn connect(tcp_clone: Arc<Mutex<Tcp>>, dst_ip: Ipv4Addr, dst_port: u16) -> Result<TcpStream, TcpError> {
@@ -240,18 +248,19 @@ impl TcpStream {
 
     let seq_num = Tcp::gen_rand_u32();
     let ack_num = Tcp::gen_rand_u32();
-    // Populate socket
-    let socket = Socket {
-      socket_id: socket_id,
-      status: SocketStatus::SynSent,
-      tcp_socket: TcpSocket::Stream(TcpStream::new(SocketStatus::SynSent, seq_num, ack_num)),
-    };
 
     let socket_key = SocketKey {
         local_ip: Some(src_ip),
         local_port: Some(port),
         remote_ip: Some(dst_ip),
         remote_port: Some(dst_port),
+    };
+
+    // Populate socket
+    let socket = Socket {
+      socket_id: socket_id,
+      status: SocketStatus::SynSent,
+      tcp_socket: TcpSocket::Stream(TcpStream::new(SocketStatus::SynSent, seq_num, ack_num, socket_key.clone())),
     };
 
     // Send SYN packet
@@ -277,7 +286,9 @@ impl TcpStream {
       let mut timeout_result: Option<WaitTimeoutResult> = None;
 
       // Wait to receive the SYN + ACK response
-      if *pending_conns != (SocketStatus::Established, ack_num, seq_num + 1) {
+      if !(pending_conns.0 == SocketStatus::Established 
+        && pending_conns.1 == ack_num 
+        && pending_conns.2 == seq_num + 1) { 
         (pending_conns, timeout_result) = pend_cvar.wait_timeout(pending_conns, Duration::from_secs(2 + 2 * i))
         .map(|result| {
           (result.0, Some(result.1))
@@ -286,7 +297,7 @@ impl TcpStream {
 
       if let Some(result) = timeout_result {
         if !result.timed_out() {
-          *pending_conns = (SocketStatus::Established, seq_num + 1, ack_num + 1);
+          *pending_conns = (SocketStatus::Established, seq_num + 1, ack_num + 1, pending_conns.3);
           break;
         } else {
           let tcp = tcp_clone.lock().unwrap();
@@ -325,18 +336,97 @@ impl TcpStream {
     });
   }
 
-  pub fn read(&self, buf: &mut[u8]) -> Result<usize, TcpError> {
-      // TODO: Implement TCP reading
-      unimplemented!();
+  pub fn read(&mut self, bytes_to_read: u32) -> Result<Vec<u8>, TcpError> {
+      let mut recv_buffer = self.receive_buffer.0.lock().unwrap();
+      
+      let available_bytes = recv_buffer.nxt - recv_buffer.lbr;
+      let lbr = recv_buffer.lbr.clone();
+      let bytes_to_return = std::cmp::min(available_bytes, bytes_to_read);
+
+      if bytes_to_return == 0 {
+        // handle if there is nothing
+      }
+      let data = recv_buffer.buffer.read(&lbr, &bytes_to_return);
+      recv_buffer.lbr = recv_buffer.lbr.wrapping_add(bytes_to_return);
+      Ok(data)
   }
 
-  pub fn write(&self, buf: &[u8]) -> Result<usize, TcpError> {
-      // TODO: Implement TCP writing
-      unimplemented!();
+  pub fn write(&mut self, tcp_clone: Arc<Mutex<Tcp>>, buf: &[u8]) -> Result<usize, TcpError> {
+      let mut send_buffer = self.send_buffer.0.lock().unwrap();
+      let lbw = send_buffer.buffer.write(Arc::clone(&self.status), buf);
+      
+      // only need to update lbw since we are first writing to the buffer
+      send_buffer.lbw = lbw;
+
+      // Notify sending thread that new bytes have been written into the buffer
+      self.send_buffer.1.notify_all();
+      
+      Ok(0)
   }   
 
   pub fn close(&self) -> Result<(), TcpError> {
       // TODO: Implement TCP closing
       unimplemented!();
+  }
+
+  // Called on a separate thread.
+  pub fn send_bytes(&mut self, tcp_clone: Arc<Mutex<Tcp>>) {
+    let (buffer_lock, cvar) = &*self.send_buffer;
+    loop {
+      let mut bytes_to_send;
+      {
+        let mut send = buffer_lock.lock().unwrap();
+        send = cvar.wait(send).unwrap();
+        bytes_to_send = (send.lbw as i64) - (send.nxt as i64);
+      }
+      
+      let tcp = Arc::clone(&tcp_clone);
+      let mut available_bytes;
+      // Check to see if there are bytes in the buffer that have not been sent yet
+      while bytes_to_send >= 0 {
+        let mut send = buffer_lock.lock().unwrap();
+        { 
+          // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
+          available_bytes = self.status.0.lock().unwrap().3 - ((send.nxt as u16) - (send.una as u16));
+        }
+
+        if available_bytes <= 0 {
+          todo!("Zero-window probing");
+        }
+        
+        // Construct packet with an appropriate number of bytes
+        let send_bytes_length: u32 = bytes_to_send
+          .min(MAX_SEGMENT_SIZE as i64)
+          .min(available_bytes as i64).try_into().unwrap();
+        let start = send.buffer.seq_to_index(send.nxt);
+        let end = send.buffer.seq_to_index(send.nxt + send_bytes_length);
+        let mut send_bytes = Vec::new(); 
+        send_bytes.copy_from_slice(&send.buffer.buffer[start..end]);
+
+        let seq_num;
+        let ack_num;
+        let wnd;
+        {
+          (_, seq_num, ack_num, _) = *self.status.0.lock().unwrap();
+          wnd = self.receive_buffer.0.lock().unwrap().wnd;
+        }
+        
+
+        let packet = TcpPacket::new_ack(self.socket_key.local_port.unwrap(), 
+        self.socket_key.remote_port.unwrap(),
+          seq_num, ack_num, wnd, send_bytes);
+
+        {
+          let safe_tcp = tcp.lock().unwrap();
+          safe_tcp.send_packet(packet, self.socket_key.remote_ip.unwrap());
+        }
+      
+        // Adjust send.nxt
+        send.nxt = end as u32;
+        // Recalculate bytes_to_send
+        bytes_to_send = (send.lbw as i64) - (send.nxt as i64);
+        drop(send);
+      }
+    }
   }
 }

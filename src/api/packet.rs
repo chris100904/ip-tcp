@@ -24,7 +24,7 @@ pub struct RipPacket {
 #[derive(Debug)]
 pub struct TcpPacket {
   pub src_port: u16,
-  pub dest_port: u16,
+  pub dst_port: u16,
   pub seq_num: u32,
   pub ack_num: u32, 
   // pub data_offset: u8,
@@ -98,11 +98,11 @@ impl RipPacket {
 }
 
 impl TcpPacket {
-  pub fn new(src_port: u16, dest_port:u16, seq_num: u32, ack_num: u32, 
+  pub fn new(src_port: u16, dst_port:u16, seq_num: u32, ack_num: u32, 
     flags: TcpFlags, payload:Vec<u8>) -> TcpPacket {
     TcpPacket {
         src_port,
-        dest_port,
+        dst_port,
         seq_num,
         ack_num,
         flags,
@@ -115,7 +115,7 @@ impl TcpPacket {
   pub fn clone(&self) -> TcpPacket {
     TcpPacket {
         src_port: self.src_port,
-        dest_port: self.dest_port,
+        dst_port: self.dst_port,
         seq_num: self.seq_num,
         ack_num: self.ack_num,
         flags: self.flags.clone(),
@@ -125,20 +125,33 @@ impl TcpPacket {
     }
   }
   
-  pub fn new_syn(src_port: u16, dest_port: u16, seq_num: u32, ack_num: u32) -> TcpPacket {
-    TcpPacket::new(src_port, dest_port,
+  pub fn new_syn(src_port: u16, dst_port: u16, seq_num: u32, ack_num: u32) -> TcpPacket {
+    TcpPacket::new(src_port, dst_port,
     seq_num, ack_num, TcpFlags::SYN, Vec::new())
   }
 
-  pub fn new_syn_ack(src_port: u16, dest_port: u16, new_seq_num: u32, new_ack_num: u32) -> TcpPacket {
-    TcpPacket::new(src_port, dest_port, new_seq_num, 
+  pub fn new_syn_ack(src_port: u16, dst_port: u16, new_seq_num: u32, new_ack_num: u32) -> TcpPacket {
+    TcpPacket::new(src_port, dst_port, new_seq_num, 
     new_ack_num, TcpFlags::SYN | TcpFlags::ACK, Vec::new())
+  }
+
+  pub fn new_ack(src_port: u16, dst_port: u16, seq_num: u32, ack_num: u32, window: u16, payload: Vec<u8>) -> TcpPacket {
+    TcpPacket {
+      src_port, 
+      dst_port, 
+      seq_num, 
+      ack_num, 
+      window,
+      flags: TcpFlags::ACK, 
+      checksum: 0,
+      payload
+    }
   }
 
   pub fn serialize_tcp(&self, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
     let mut tcp_header = TcpHeader::new(
       self.src_port,     // source port
-      self.dest_port,     // destination port
+      self.dst_port,     // destination port
       self.seq_num,  // sequence number
       self.window,   // window size
     );
@@ -180,7 +193,7 @@ impl TcpPacket {
     // TODO: Validations? (Flags, checksum)
     Ok(TcpPacket {
         src_port: header.source_port,
-        dest_port: header.destination_port,
+        dst_port: header.destination_port,
         seq_num: header.sequence_number,
         ack_num: header.acknowledgment_number,
 //        data_offset: tcp_slice.data_offset() as u8,

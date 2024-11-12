@@ -123,8 +123,8 @@ impl Tcp {
                       TCPCommand::ListenAccept(port) => Tcp::listen_and_accept(tcp_clone, port),
                       TCPCommand::TCPConnect(vip, port) => Tcp::connect(&tcp, vip, port),
                       TCPCommand::ListSockets => tcp.lock().unwrap().list_sockets(),
-                      TCPCommand::TCPSend(socket_id, bytes) => todo!(),// safe_tcp.send_data(&socketId, &data),
-                      TCPCommand::TCPReceive(socket_id, numbytes) => todo!(),// safe_tcp.receive_data(&socketId, &numbytes),
+                      TCPCommand::TCPSend(socket_id, bytes) => Tcp::send_data(tcp_clone, socket_id, bytes),// safe_tcp.send_data(&socketId, &data),
+                      TCPCommand::TCPReceive(socket_id, numbytes) => Tcp::receive_data(tcp_clone, socket_id, numbytes),// safe_tcp.receive_data(&socketId, &numbytes),
                       TCPCommand::TCPClose(socket_id) => todo!(),// safe_tcp.close_socket(&socketId),
                       TCPCommand::SendFile(path, addr, port) => todo!(),// safe_tcp.send_file(&path, Ipv4Addr::from_str(addr).unwrap(), &port.parse().unwrap()),
                       TCPCommand::ReceiveFile(path, port) => todo!(),// safe_tcp.receive_file(&path, &port.parse().unwrap()),
@@ -133,7 +133,79 @@ impl Tcp {
               Err(_) => break,
           }
       }
-  }
+    }
+
+    pub fn send_data(tcp: Arc<Mutex<Self>>, socket_id: u32, bytes: String) -> Result<(), TcpError> {
+      // find the socket by ID
+      let socket;
+      let socket_key;
+      {
+        let safe_tcp = tcp.lock().unwrap();
+        (socket_key, socket) = safe_tcp.get_socket_by_id(socket_id)
+          .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
+      }
+
+      // check if the socket is valid and established
+      if socket.status != SocketStatus::Established {
+        // whatever error here
+        return Err(TcpError::ConnectionError { 
+          message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket.status.to_string()) 
+        })
+      }
+      // get the TcpStream from the socket
+      
+      // translate into bytes and write into the send buffer
+      match socket.tcp_socket {
+        TcpSocket::Stream(mut stream) => {
+          let data = bytes.as_bytes();
+          let result = stream.write(Arc::clone(&tcp), data);
+        },
+        TcpSocket::Listener(_) => {
+          return Err(TcpError::ConnectionError { message: "Socket was of type Listener rather than Stream.".to_string() });
+        }
+      }
+
+      return Ok(());
+    }
+
+    pub fn receive_data(tcp_clone: Arc<Mutex<Tcp>>, socket_id: u32, bytes: u32) -> Result<(), TcpError> {
+      // find the socket by ID
+      let socket;
+      let socket_key;
+      {
+        let safe_tcp = tcp_clone.lock().unwrap();
+        (socket_key, socket) = safe_tcp.get_socket_by_id(socket_id)
+          .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
+      }
+
+      // check if the socket is valid and established
+      if socket.status != SocketStatus::Established {
+        // whatever error here
+        return Err(TcpError::ConnectionError { 
+          message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket.status.to_string()) 
+        })
+      }
+      // get the TcpStream from the socket
+      
+      // read the designated amount (or less) from the buffer
+      match socket.tcp_socket {
+        TcpSocket::Stream(mut stream) => {
+          let result = stream.read(bytes);
+          match result {
+            Ok(bytes_read) => {
+              println!("Read {} bytes: {}", bytes_read.len(), String::from_utf8_lossy(&bytes_read));
+              Ok(())
+            },
+            Err(e) => Err(e), // HANDLE THIS ERROR????
+          }
+        },
+        TcpSocket::Listener(_) => {
+          return Err(TcpError::ConnectionError { message: "Socket was of type Listener rather than Stream.".to_string() });
+        }
+      }
+
+      // return Ok(());
+    }
 
     pub fn listen_and_accept(tcp: Arc<Mutex<Self>>, port: u16) -> Result<(), TcpError> { // -> ListenerHandle {
         let tcp_listener = TcpListener::listen(Arc::clone(&tcp), port)?;
@@ -144,6 +216,7 @@ impl Tcp {
         let mut tcp_clone = Arc::clone(&tcp);
         let thread_handle = thread::spawn(move || {
             loop {
+              let tcp = Arc::clone(&tcp_clone);
               let should_stop = {
                     let (lock, cvar) = &*stop_signal_clone;
                     let mut stop = lock.lock().unwrap();
@@ -158,8 +231,19 @@ impl Tcp {
                     // Stop protocol?
                     break;
                 }
-                tcp_listener.accept(Arc::clone(&tcp_clone))
-                  .inspect_err(|e| eprintln!("{e}"));
+                let tcp_clone_2 = Arc::clone(&tcp);
+                match tcp_listener.accept(tcp) {
+                  Ok(socket) => {
+                    if let TcpSocket::Stream(mut stream) = socket.tcp_socket {
+                      thread::spawn( move || {
+                        stream.send_bytes(tcp_clone_2);
+                      });
+                    }
+                  },
+                  Err(e) => {
+                    eprintln!("{e}");
+                  }
+                }
               
                 // match tcp_listener.accept(self) { 
                 //     Ok(new_socket) => {
@@ -219,7 +303,7 @@ impl Tcp {
       // NOTE: src_ip and dest_ip and ports are FLIPPED because we want to check if the dest_ip is our source_ip, etc. 
       let socket_key = SocketKey {
         local_ip: Some(dest_ip),
-        local_port: Some(tcp_packet.dest_port),
+        local_port: Some(tcp_packet.dst_port),
         remote_ip: Some(src_ip),
         remote_port: Some(tcp_packet.src_port),
       };
@@ -228,7 +312,7 @@ impl Tcp {
       match tcp_packet.flags {
         flag if flag == TcpFlags::SYN => {
           // Check if tcp_packet.dst_port is a LISTEN port (src_port in socket table)
-          if let Some(listen_socket) = self.is_listen(tcp_packet.dest_port) {
+          if let Some(listen_socket) = self.is_listen(tcp_packet.dst_port) {
             Ok(if let TcpSocket::Listener(ref listen_conn) = listen_socket.tcp_socket {
               // Acquire lock to check for existing connection
               let already_exists = {
@@ -242,6 +326,7 @@ impl Tcp {
                       socket_key,
                       seq_num: tcp_packet.seq_num,
                       ack_num: tcp_packet.ack_num,
+                      window: tcp_packet.window,
                   };
                   println!("{:?}", (tcp_packet.ack_num, tcp_packet.seq_num));
                   listen_conn.add_connection(connection); // Safe to call `add_connection` here
@@ -259,7 +344,7 @@ impl Tcp {
               // If so, then proceed with connect (send the ACK) and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
-                *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num);
+                *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num, tcp_packet.window);
 
                 // Notify waiting threads that a new connection is available
                 cvar.notify_all(); // changed one to all
@@ -280,16 +365,20 @@ impl Tcp {
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
                 {
-                  *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num);
+                  *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num, tcp_packet.window);
                 }
                 // Notify waiting threads that a new connection is available
                 cvar.notify_all(); // changed one to all
               } else {
                 return Err(TcpError::ConnectionError { message: "Could not find expected TcpStream.".to_string() });
               }
-            } 
-            // Other valid statuses: FIN-WAIT1, CLOSING, LAST-ACK
-            else if socket.status == SocketStatus::FinWait1 {
+            } else if socket.status == SocketStatus::Established {
+              // Update socket's ack num, seq num, and window size
+              // Notify the thread looking to update the buffers in response to these.
+              // Specifically, if the ACK number / window size changed, then update the send_buffer should be notified.
+              // If there is data in the payload, then the receive_buffer should be changed.
+
+            } else if socket.status == SocketStatus::FinWait1 {
               todo!()
             } else if socket.status == SocketStatus::Closing {
               todo!()
@@ -360,7 +449,8 @@ impl Tcp {
 
     pub fn connect(tcp: &Arc<Mutex<Self>>, vip: Ipv4Addr, port: u16) -> Result<(), TcpError> {
       // Create new normal socket
-      TcpStream::connect(Arc::clone(tcp), vip, port)?;
+      let mut stream = TcpStream::connect(Arc::clone(tcp), vip, port)?;
+      stream.send_bytes(Arc::clone(&tcp));
       Ok(())
     }
 
@@ -421,6 +511,16 @@ impl Tcp {
         None
     }
 
+    // Get a socket from the socket 
+    pub fn get_socket_by_id(&self, id: u32) -> Option<(SocketKey, Socket)> {
+      let table = self.socket_table.lock().unwrap();
+      for (socket_key, socket) in table.iter() {
+        if socket.socket_id == id {
+          return Some((socket_key.clone(), socket.clone()));
+        }
+      }
+      None
+    }
     // Get all sockets from the socket table
     pub fn get_all_sockets(&self) -> Vec<Socket> {
         let socket_table = self.socket_table.lock().unwrap();
@@ -429,7 +529,7 @@ impl Tcp {
 
     // Search socket table for next unique id
     pub fn next_unique_id(&self) -> u32 {
-        let max_id = self.socket_table.lock().unwrap().values().map(|socket| socket.socket_id).max(); // TODO
+        let max_id = self.socket_table.lock().unwrap().values().map(|socket| socket.socket_id).max();
         match max_id {
             Some(id) => id + 1,
             None => 0,
