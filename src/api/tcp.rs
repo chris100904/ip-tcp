@@ -158,7 +158,8 @@ impl Tcp {
       match socket.tcp_socket {
         TcpSocket::Stream(mut stream) => {
           let data = bytes.as_bytes();
-          let result = stream.write(Arc::clone(&tcp), data);
+          println!("{:?}", data);
+          let result = stream.write(data);
         },
         TcpSocket::Listener(_) => {
           return Err(TcpError::ConnectionError { message: "Socket was of type Listener rather than Stream.".to_string() });
@@ -298,11 +299,11 @@ impl Tcp {
     // Receive a packet
     pub fn receive_packet(&mut self, packet: Packet, src_ip: Ipv4Addr) -> Result<(), TcpError> {
       let src_ip = packet.src_ip;
-      let dest_ip = packet.dest_ip;
+      let dst_ip = packet.dest_ip;
       let tcp_packet = TcpPacket::parse_tcp(&packet.payload).unwrap(); // TODO
       // NOTE: src_ip and dest_ip and ports are FLIPPED because we want to check if the dest_ip is our source_ip, etc. 
       let socket_key = SocketKey {
-        local_ip: Some(dest_ip),
+        local_ip: Some(dst_ip),
         local_port: Some(tcp_packet.dst_port),
         remote_ip: Some(src_ip),
         remote_port: Some(tcp_packet.src_port),
@@ -375,9 +376,34 @@ impl Tcp {
             } else if socket.status == SocketStatus::Established {
               // Update socket's ack num, seq num, and window size
               // Notify the thread looking to update the buffers in response to these.
-              // Specifically, if the ACK number / window size changed, then update the send_buffer should be notified.
+              // Specifically, if the ACK number / window size changed, then update the send_buffer.
               // If there is data in the payload, then the receive_buffer should be changed.
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                let (lock, cvar) = &*stream.status;
+                *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.ack_num, tcp_packet.seq_num, tcp_packet.window);
 
+                stream.send_buffer.0.lock().unwrap().acknowledge(tcp_packet.ack_num);
+
+                let mut recv_buf = stream.receive_buffer.0.lock().unwrap();
+
+                // TODO: SET NXT VALUE
+                // TODO: THINK OF A BETTER WAY TO GET THE VALUES OF THE ACK RESPONSE PACKET
+                if recv_buf.nxt != tcp_packet.seq_num {
+                  println!("{} != {}", recv_buf.nxt, tcp_packet.seq_num);
+                  let bytes_written = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
+                  let status = lock.lock().unwrap();
+                  let src_port = tcp_packet.dst_port;
+                  let dst_port = tcp_packet.src_port;
+                  let ack_response = TcpPacket::new_ack(
+                    src_port,
+                    dst_port, 
+                    status.1.clone(), 
+                    status.2.clone() + bytes_written as u32, 
+                    status.3.clone() - bytes_written as u16, 
+                    Vec::new());
+                  self.send_packet(ack_response, src_ip);
+                }
+              }
             } else if socket.status == SocketStatus::FinWait1 {
               todo!()
             } else if socket.status == SocketStatus::Closing {
@@ -450,7 +476,10 @@ impl Tcp {
     pub fn connect(tcp: &Arc<Mutex<Self>>, vip: Ipv4Addr, port: u16) -> Result<(), TcpError> {
       // Create new normal socket
       let mut stream = TcpStream::connect(Arc::clone(tcp), vip, port)?;
-      stream.send_bytes(Arc::clone(&tcp));
+      let tcp_clone = Arc::clone(tcp);
+      thread::spawn( move || {
+        stream.send_bytes(Arc::clone(&tcp_clone));
+      });
       Ok(())
     }
 

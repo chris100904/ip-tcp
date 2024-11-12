@@ -339,24 +339,26 @@ impl TcpStream {
   pub fn read(&mut self, bytes_to_read: u32) -> Result<Vec<u8>, TcpError> {
       let mut recv_buffer = self.receive_buffer.0.lock().unwrap();
       
-      let available_bytes = recv_buffer.nxt - recv_buffer.lbr;
-      let lbr = recv_buffer.lbr.clone();
+      let available_bytes = recv_buffer.nxt.wrapping_sub(recv_buffer.lbr);
+      let lbr = recv_buffer.lbr;
       let bytes_to_return = std::cmp::min(available_bytes, bytes_to_read);
 
       if bytes_to_return == 0 {
         // handle if there is nothing
       }
-      let data = recv_buffer.buffer.read(&lbr, &bytes_to_return);
+
+      let data = recv_buffer.buffer.read(lbr, bytes_to_return);
+      println!("{:?}",data);
       recv_buffer.lbr = recv_buffer.lbr.wrapping_add(bytes_to_return);
       Ok(data)
   }
 
-  pub fn write(&mut self, tcp_clone: Arc<Mutex<Tcp>>, buf: &[u8]) -> Result<usize, TcpError> {
+  pub fn write(&mut self, buf: &[u8]) -> Result<usize, TcpError> {
       let mut send_buffer = self.send_buffer.0.lock().unwrap();
-      let lbw = send_buffer.buffer.write(Arc::clone(&self.status), buf);
+      let lbw = send_buffer.write(buf);
       
       // only need to update lbw since we are first writing to the buffer
-      send_buffer.lbw = lbw;
+      send_buffer.lbw = lbw as u32;
 
       // Notify sending thread that new bytes have been written into the buffer
       self.send_buffer.1.notify_all();
@@ -383,7 +385,8 @@ impl TcpStream {
       let tcp = Arc::clone(&tcp_clone);
       let mut available_bytes;
       // Check to see if there are bytes in the buffer that have not been sent yet
-      while bytes_to_send >= 0 {
+      while bytes_to_send > 0 {
+        println!("{bytes_to_send}");
         let mut send = buffer_lock.lock().unwrap();
         { 
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
@@ -398,11 +401,15 @@ impl TcpStream {
         let send_bytes_length: u32 = bytes_to_send
           .min(MAX_SEGMENT_SIZE as i64)
           .min(available_bytes as i64).try_into().unwrap();
-        let start = send.buffer.seq_to_index(send.nxt);
-        let end = send.buffer.seq_to_index(send.nxt + send_bytes_length);
-        let mut send_bytes = Vec::new(); 
-        send_bytes.copy_from_slice(&send.buffer.buffer[start..end]);
 
+        // let start = send.buffer.seq_to_index(send.nxt);
+        // let end = send.buffer.seq_to_index(send.nxt + send_bytes_length);
+        //let mut send_bytes = vec![0; end - start]; 
+        // println!("{:?}", &send.buffer.buffer[start..end]);
+        // send_bytes.copy_from_slice(&send.buffer.buffer[start..end]);
+        let nxt = send.nxt;
+        let send_bytes = send.buffer.read(nxt, send_bytes_length);
+        println!("{:?}", send_bytes);
         let seq_num;
         let ack_num;
         let wnd;
@@ -422,7 +429,7 @@ impl TcpStream {
         }
       
         // Adjust send.nxt
-        send.nxt = end as u32;
+        send.nxt += send_bytes_length as u32;
         // Recalculate bytes_to_send
         bytes_to_send = (send.lbw as i64) - (send.nxt as i64);
         drop(send);

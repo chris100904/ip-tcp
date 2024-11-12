@@ -45,7 +45,7 @@ impl SendBuffer {
 
     let bytes_written = self.buffer.write(self.lbw, &data[..bytes_to_write]);
     self.lbw = self.lbw.wrapping_add(bytes_written as u32); 
-
+    println!("lbw: {}, nxt: {}", self.lbw, self.nxt);
     bytes_written
   }
 
@@ -90,7 +90,7 @@ impl ReceiveBuffer {
   // Write data into the receive buffer.
   // Returns the number of bytes written. If no space is available, returns 0.
   pub fn write(&mut self, data_seq: u32, data: &[u8]) -> usize {
-    let available_space = self.wnd as usize - (self.nxt.wrapping_sub(self.lbr) as usize);
+    let available_space = self.wnd.wrapping_sub(self.nxt.wrapping_sub(self.lbr) as u16) as usize;
     let bytes_to_write = std::cmp::min(data.len(), available_space);
 
     if bytes_to_write == 0{
@@ -99,8 +99,8 @@ impl ReceiveBuffer {
 
     let bytes_written = self.buffer.write(data_seq, &data[..bytes_to_write]);
 
-    // Update lbr to reflect the last byte received 
-    self.lbr = self.lbr.wrapping_add(bytes_written as u32);
+    // Update nxt to reflect the last byte received 
+    self.nxt = data_seq.wrapping_add(bytes_written as u32);
 
     bytes_written
   }
@@ -147,7 +147,7 @@ impl CircularBuffer {
         let mut current_seq = seq;
 
         for &byte in data {
-            if self.available_space() == 0{
+            if self.available_space() == 0 {
                 break; 
             }
             let index = self.seq_to_index(current_seq);
@@ -156,6 +156,7 @@ impl CircularBuffer {
             current_seq = current_seq.wrapping_add(1);
             bytes_written += 1
         }
+        println!("{:?}", self.buffer[self.seq_to_index(current_seq) - 1 as usize]);
         bytes_written 
     }
     
