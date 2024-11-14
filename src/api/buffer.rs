@@ -90,6 +90,10 @@ impl ReceiveBuffer {
   // Write data into the receive buffer.
   // Returns the number of bytes written. If no space is available, returns 0.
   pub fn write(&mut self, data_seq: u32, data: &[u8]) -> usize {
+    // lbr needs to be changed initially... 
+    if self.lbr == 0 {
+        self.lbr = data_seq;
+    }
     let available_space = self.wnd.wrapping_sub(self.nxt.wrapping_sub(self.lbr) as u16) as usize;
     let bytes_to_write = std::cmp::min(data.len(), available_space);
 
