@@ -38,7 +38,7 @@ impl SendBuffer {
   // Returns the number of bytes written. If the buffer is full, returns 0.
   pub fn write(&mut self, data: &[u8]) -> usize {
     // take amount of bytes written in buffer and subtract by total capacity
-    let available_space = BUFFER_SIZE - (self.lbw.wrapping_sub(self.una) as usize);
+    let available_space = BUFFER_SIZE.wrapping_sub(self.lbw.wrapping_sub(self.una) as usize);
     
     // need to only be able to write as much as we can (can't overfill the buffer) 
     let bytes_to_write = std::cmp::min(data.len(), available_space); 

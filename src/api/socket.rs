@@ -336,6 +336,7 @@ impl TcpStream {
     });
   }
 
+  // TODO
   pub fn read(&mut self, bytes_to_read: u32) -> Result<Vec<u8>, TcpError> {
       let mut recv_buffer = self.receive_buffer.0.lock().unwrap();
       
@@ -345,6 +346,7 @@ impl TcpStream {
 
       if bytes_to_return == 0 {
         // handle if there is nothing
+        // BLOCK
       }
 
       let data = recv_buffer.buffer.read(lbr, bytes_to_return);
@@ -394,6 +396,8 @@ impl TcpStream {
         }
 
         if available_bytes <= 0 {
+          // Wait for non-zero size
+          // Send next byte you would want to send
           todo!("Zero-window probing");
         }
         
@@ -404,7 +408,7 @@ impl TcpStream {
 
         // let start = send.buffer.seq_to_index(send.nxt);
         // let end = send.buffer.seq_to_index(send.nxt + send_bytes_length);
-        //let mut send_bytes = vec![0; end - start]; 
+        // let mut send_bytes = vec![0; end - start]; 
         // println!("{:?}", &send.buffer.buffer[start..end]);
         // send_bytes.copy_from_slice(&send.buffer.buffer[start..end]);
         let nxt = send.nxt;
