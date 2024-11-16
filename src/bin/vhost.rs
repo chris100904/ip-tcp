@@ -100,7 +100,7 @@ pub fn receive_tcp_packet(tcp_clone: Arc<Mutex<Tcp>>, tcp_recv_ip: Receiver<(Pac
         loop {
           match tcp_clone.try_lock() {
             Ok(mut safe_tcp) => {
-              safe_tcp.receive_packet(packet, src_ip);
+              safe_tcp.receive_packet(packet);
               break;
             }
             Err(e) => {}
@@ -114,7 +114,7 @@ pub fn receive_tcp_packet(tcp_clone: Arc<Mutex<Tcp>>, tcp_recv_ip: Receiver<(Pac
 
 // Has the IP protocol send a TCP packet.
 pub fn send_tcp_packet(host_clone: Arc<Mutex<Device>>, ip_recv_tcp: Receiver<(TcpPacket, Ipv4Addr)>, src_ip: Ipv4Addr) {
-  loop{
+  loop {
     match ip_recv_tcp.recv() {
       Ok((tcp_packet, dst_ip)) => {
         loop {
@@ -128,7 +128,7 @@ pub fn send_tcp_packet(host_clone: Arc<Mutex<Device>>, ip_recv_tcp: Receiver<(Tc
                   safe_host.forward_packet(packet, route.next_hop.clone());
                 },
                 None => {
-                  eprintln!("No route found for destination IP: {}",dst_ip);
+                  eprintln!("No route found for destination IP: {}", dst_ip);
                 }
               }
               break;

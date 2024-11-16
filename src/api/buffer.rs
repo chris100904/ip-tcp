@@ -44,6 +44,10 @@ impl SendBuffer {
     let bytes_to_write = std::cmp::min(data.len(), available_space); 
 
     let bytes_written = self.buffer.write(self.lbw, &data[..bytes_to_write]);
+    // // temp fix to off by 1 issue
+    // if self.lbw == 0 {
+    //   bytes_written -= 1;
+    // }
     self.lbw = self.lbw.wrapping_add(bytes_written as u32); 
     println!("lbw: {}, nxt: {}", self.lbw, self.nxt);
     bytes_written

@@ -1,8 +1,8 @@
+use std::future::pending;
 use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap,  VecDeque};
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
-use std::thread;
 use std::time::{Duration, Instant};
 use chrono::Local;
 use crate::api::packet::{TcpFlags, TcpPacket};
@@ -111,14 +111,14 @@ impl TcpListener {
         tcp_socket: TcpSocket::Stream(
           TcpStream::new(
             SocketStatus::SynReceived, 
-            connection.ack_num, 
-            connection.seq_num + 1, 
+            connection.seq_num, 
+            connection.ack_num + 1, 
             connection.socket_key.clone()))
       };
       
       // Send SYN + ACK packet
       let syn_ack_packet = TcpPacket::new_syn_ack(port, 
-      dst_port, connection.ack_num, connection.seq_num + 1);
+      dst_port, connection.seq_num, connection.ack_num + 1);
       tcp.send_packet(syn_ack_packet, dst_ip);
       // update socket table
       {
@@ -146,12 +146,12 @@ impl TcpListener {
       let mut pending_conns = pend_lock.lock().unwrap();
 
       // Wait to receive the ACK response
-      while !(pending_conns.0 == SocketStatus::Established 
-        && pending_conns.1 == connection.seq_num + 1
-        && pending_conns.2 == connection.ack_num + 1) {
+      while !pending_conns.verify(SocketStatus::Established,
+        connection.seq_num + 1,connection.ack_num + 1) {
         pending_conns = pend_cvar.wait(pending_conns).unwrap(); 
       }
-      *pending_conns = (SocketStatus::Established, connection.ack_num + 1, connection.seq_num + 1, connection.window);
+      pending_conns.update(SocketStatus::Established, connection.seq_num + 1,
+         connection.ack_num + 1, Some(connection.window));
     }
 
     let result = {
@@ -200,7 +200,8 @@ pub struct RetransmissionEntry {
 pub struct TcpStream {
   // May not need to be arc mutexed.
   // Represents SocketStatus, seq_num, ack_num
-  pub status: Arc<(Mutex<(SocketStatus, u32, u32, u16)>, Condvar)>,
+  pub status: Arc<(Mutex<StreamInfo>, Condvar)>,
+
   pub socket_key: SocketKey,
   // TODO: add a TcpStream struct to hold the TcpStream object    
   // A buffer for reading data
@@ -214,10 +215,53 @@ pub struct TcpStream {
   pub retransmission_queue: Arc<Mutex<VecDeque<RetransmissionEntry>>>,
 }
 
+#[derive(PartialEq, Debug, Clone)]
+pub struct StreamInfo {
+  pub status: SocketStatus,
+  pub seq_num: u32,
+  pub ack_num: u32,
+  pub window_size: u16,
+}
+
+impl StreamInfo {
+  pub fn new(status: SocketStatus, seq_num: u32, ack_num: u32, window_size: u16) -> StreamInfo {
+    StreamInfo {
+        status,
+        seq_num,
+        ack_num,
+        window_size,
+    }
+  }
+
+  // Returns true if self's status, seq_num, and ack_num all match
+  pub fn verify(&self, status: SocketStatus, seq_num: u32, ack_num: u32) -> bool {
+    return self.status == status && self.seq_num == seq_num && self.ack_num == ack_num;
+  }
+
+  pub fn update(&mut self, status: SocketStatus, seq_num: u32, 
+    ack_num: u32, window_size: Option<u16>) {
+      self.status = status;
+      self.seq_num = seq_num;
+      self.ack_num = ack_num;
+      if let Some(window_size) = window_size {
+        self.window_size = window_size;
+      }
+  }
+
+  pub fn clone(&self) -> StreamInfo {
+    StreamInfo {
+        status: self.status.clone(),
+        seq_num: self.seq_num,
+        ack_num: self.ack_num,
+        window_size: self.window_size,
+    }
+  }
+}
+
 impl TcpStream { 
   pub fn new(status: SocketStatus, seq_num: u32, ack_num: u32, socket_key: SocketKey) -> TcpStream {
     TcpStream { 
-      status: Arc::new((Mutex::new((status, seq_num, ack_num, 0)), Condvar::new())),
+      status: Arc::new((Mutex::new(StreamInfo::new(status, seq_num, ack_num, 0)), Condvar::new())),
       socket_key,
       send_buffer: Arc::new((Mutex::new(SendBuffer::new()), Condvar::new())), 
       receive_buffer: Arc::new((Mutex::new(ReceiveBuffer::new()), Condvar::new())), 
@@ -286,10 +330,10 @@ impl TcpStream {
       let mut timeout_result: Option<WaitTimeoutResult> = None;
 
       // Wait to receive the SYN + ACK response
-      if !(pending_conns.0 == SocketStatus::Established 
-        && pending_conns.1 == ack_num 
-        && pending_conns.2 == seq_num + 1) { 
-        (pending_conns, timeout_result) = pend_cvar.wait_timeout(pending_conns, Duration::from_secs(2 + 2 * i))
+      // Verify is always in the perspective of what we would send from our socket.
+      if !pending_conns.verify(SocketStatus::Established, seq_num + 1, ack_num) { 
+        (pending_conns, timeout_result) = pend_cvar.wait_timeout(pending_conns, 
+          Duration::from_secs(2 + 2 * i))
         .map(|result| {
           (result.0, Some(result.1))
         }).unwrap();
@@ -297,7 +341,8 @@ impl TcpStream {
 
       if let Some(result) = timeout_result {
         if !result.timed_out() {
-          *pending_conns = (SocketStatus::Established, seq_num + 1, ack_num + 1, pending_conns.3);
+          pending_conns.update(SocketStatus::Established, seq_num + 1, 
+            ack_num + 1, None);
           break;
         } else {
           let tcp = tcp_clone.lock().unwrap();
@@ -324,7 +369,7 @@ impl TcpStream {
       let mut socket_table = tcp.socket_table.lock().unwrap();
       let socket = socket_table.get_mut(&socket_key).ok_or(
         TcpError::StreamError { message: "Could not retrieve TcpStream from socket table.".to_string() }
-      )?; // TODO
+      )?;
       socket.status = SocketStatus::Established;
       if let TcpSocket::Stream(stream) = &socket.tcp_socket {
         println!("Created new socket with ID {}", socket.socket_id);
@@ -358,9 +403,6 @@ impl TcpStream {
   pub fn write(&mut self, buf: &[u8]) -> Result<usize, TcpError> {
       let mut send_buffer = self.send_buffer.0.lock().unwrap();
       let lbw = send_buffer.write(buf);
-      
-      // only need to update lbw since we are first writing to the buffer
-      send_buffer.lbw = lbw as u32;
 
       // Notify sending thread that new bytes have been written into the buffer
       self.send_buffer.1.notify_all();
@@ -381,18 +423,19 @@ impl TcpStream {
       {
         let mut send = buffer_lock.lock().unwrap();
         send = cvar.wait(send).unwrap();
-        bytes_to_send = (send.lbw as i64) - (send.nxt as i64);
+        bytes_to_send = send.lbw.wrapping_sub(send.nxt) as i64;
       }
       
       let tcp = Arc::clone(&tcp_clone);
-      let mut available_bytes;
+      let mut available_bytes: i64;
       // Check to see if there are bytes in the buffer that have not been sent yet
       while bytes_to_send > 0 {
-        println!("{bytes_to_send}");
         let mut send = buffer_lock.lock().unwrap();
         { 
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
-          available_bytes = self.status.0.lock().unwrap().3 - ((send.nxt as u16) - (send.una as u16));
+          
+          available_bytes = self.status.0.lock().unwrap().window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
+          println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
         }
 
         if available_bytes <= 0 {
@@ -418,7 +461,9 @@ impl TcpStream {
         let ack_num;
         let wnd;
         {
-          (_, seq_num, ack_num, _) = *self.status.0.lock().unwrap();
+          let stream_info = self.status.0.lock().unwrap();
+          seq_num = stream_info.seq_num;
+          ack_num = stream_info.ack_num;
           wnd = self.receive_buffer.0.lock().unwrap().wnd;
         }
         
@@ -436,7 +481,6 @@ impl TcpStream {
         send.nxt += send_bytes_length as u32;
         // Recalculate bytes_to_send
         bytes_to_send = (send.lbw as i64) - (send.nxt as i64);
-        drop(send);
       }
     }
   }

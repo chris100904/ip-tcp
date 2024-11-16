@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 pub struct Packet {
     // Fields representing the packet structure (e.g., headers, payload)
     pub src_ip: std::net::Ipv4Addr,
-    pub dest_ip: std::net::Ipv4Addr,
+    pub dst_ip: std::net::Ipv4Addr,
     pub protocol: u8,
     pub payload: Vec<u8>, // actual data carried
     pub ttl: u8, // time to live 
@@ -214,10 +214,10 @@ impl TcpPacket {
 
 impl Packet {
     // Create a new Packet struct using etherparse::PacketBuilder
-    pub fn new(src_ip: Ipv4Addr, dest_ip: Ipv4Addr, protocol: u8, payload: Vec<u8>) -> Packet {
+    pub fn new(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, protocol: u8, payload: Vec<u8>) -> Packet {
         Packet {
             src_ip,
-            dest_ip,
+            dst_ip,
             protocol,   // Custom protocol (0 for Test Protocol, 200 for RIP)
             payload,   // The raw byte representation of the payload
             ttl: 16,           // TTL field (set to 20 here, can be changed)
@@ -230,7 +230,7 @@ impl Packet {
         match Ipv4HeaderSlice::from_slice(raw_data) {
             Ok(ip_slice) => {
               let src_ip = ip_slice.source_addr();
-              let dest_ip = ip_slice.destination_addr();
+              let dst_ip = ip_slice.destination_addr();
               let protocol = ip_slice.protocol();
               let ttl = ip_slice.ttl();
               let header_checksum = ip_slice.header_checksum();
@@ -242,7 +242,7 @@ impl Packet {
 
               Ok(Packet {
                   src_ip,
-                  dest_ip,
+                  dst_ip,
                   protocol: protocol.0,
                   payload,
                   ttl,
@@ -259,7 +259,7 @@ impl Packet {
         // Create the PacketBuilder for IPv4
         let builder = PacketBuilder::ipv4(
           self.src_ip.octets(),    // Source IP address
-          self.dest_ip.octets(),   // Destination IP address
+          self.dst_ip.octets(),   // Destination IP address
           16                 // TTL (time to live)
         );
         

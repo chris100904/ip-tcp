@@ -109,7 +109,7 @@ impl Device {
                   if interface.enabled {
                     // println!("RECEIVING FROM INTERFACE\n");
                     // check if the packet dest_ip matches any of the interfaces
-                    if safe_device.is_packet_for_device(&packet.dest_ip) {
+                    if safe_device.is_packet_for_device(&packet.dst_ip) {
                       if packet.protocol == 200 {
                         safe_device.process_rip_packet(packet);
                       } else if packet.protocol == 0 {
@@ -121,13 +121,13 @@ impl Device {
                       }
                     } else {
                         // packet is not meant for this device, so we need to forward it
-                        match safe_device.routing_table.lookup(packet.dest_ip) {
+                        match safe_device.routing_table.lookup(packet.dst_ip) {
                             Some(route) => {
                                 // println!("ROUTE: {:?}", route);
                                 safe_device.forward_packet(packet, route.next_hop.clone());
                             }
                             None => {
-                                eprintln!("Error: No valid interface found for destination IP: {}", packet.dest_ip);
+                                eprintln!("Error: No valid interface found for destination IP: {}", packet.dst_ip);
                             }
                         }
                     }
@@ -438,7 +438,7 @@ impl Device {
     } 
     // println!("HELLO\n");
     let rip_packet = RipPacket::new(2, entries.len() as u16, entries);
-    let packet = Packet::new(packet.dest_ip, packet.src_ip, 200, rip_packet.serialize_rip());
+    let packet = Packet::new(packet.dst_ip, packet.src_ip, 200, rip_packet.serialize_rip());
     // println!("Sending RIP packet to neighbor: {:?}", rip_packet);
     if let Some(next_route) =self.routing_table.lookup(packet.src_ip) {
       self.forward_packet(packet, next_route.next_hop.clone());
@@ -506,7 +506,7 @@ impl Device {
   pub fn process_local_packet(&mut self, packet: Packet) {
       // println!("payload: {:?}", packet.payload);
       println!("Received test packet: Src: {}, Dst: {}, TTL: {}, Data: {}", 
-          packet.src_ip, packet.dest_ip, packet.ttl, 
+          packet.src_ip, packet.dst_ip, packet.ttl, 
           String::from_utf8(packet.payload).unwrap());
   }
 

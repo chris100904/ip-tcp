@@ -119,7 +119,7 @@ impl Tcp {
         let tcp_clone = Arc::clone(&tcp);
           match receiver.recv() {
               Ok(command) => {
-                  match command {
+                  let result = match command {
                       TCPCommand::ListenAccept(port) => Tcp::listen_and_accept(tcp_clone, port),
                       TCPCommand::TCPConnect(vip, port) => Tcp::connect(&tcp, vip, port),
                       TCPCommand::ListSockets => tcp.lock().unwrap().list_sockets(),
@@ -129,6 +129,9 @@ impl Tcp {
                       TCPCommand::SendFile(path, addr, port) => todo!(),// safe_tcp.send_file(&path, Ipv4Addr::from_str(addr).unwrap(), &port.parse().unwrap()),
                       TCPCommand::ReceiveFile(path, port) => todo!(),// safe_tcp.receive_file(&path, &port.parse().unwrap()),
                   };
+                  if let Err(e) = result {
+                    eprintln!("{e}");
+                  }
               }
               Err(_) => break,
           }
@@ -138,10 +141,9 @@ impl Tcp {
     pub fn send_data(tcp: Arc<Mutex<Self>>, socket_id: u32, bytes: String) -> Result<(), TcpError> {
       // find the socket by ID
       let socket;
-      let socket_key;
       {
         let safe_tcp = tcp.lock().unwrap();
-        (socket_key, socket) = safe_tcp.get_socket_by_id(socket_id)
+        (_, socket) = safe_tcp.get_socket_by_id(socket_id)
           .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
       }
 
@@ -172,10 +174,9 @@ impl Tcp {
     pub fn receive_data(tcp_clone: Arc<Mutex<Tcp>>, socket_id: u32, bytes: u32) -> Result<(), TcpError> {
       // find the socket by ID
       let socket;
-      let socket_key;
       {
         let safe_tcp = tcp_clone.lock().unwrap();
-        (socket_key, socket) = safe_tcp.get_socket_by_id(socket_id)
+        (_, socket) = safe_tcp.get_socket_by_id(socket_id)
           .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
       }
 
@@ -297,15 +298,14 @@ impl Tcp {
     }
 
     // Receive a packet
-    pub fn receive_packet(&mut self, packet: Packet, src_ip: Ipv4Addr) -> Result<(), TcpError> {
-      let src_ip = packet.src_ip;
-      let dst_ip = packet.dest_ip;
-      let tcp_packet = TcpPacket::parse_tcp(&packet.payload).unwrap(); // TODO
+    pub fn receive_packet(&mut self, packet: Packet) -> Result<(), TcpError> {
+      let tcp_packet = TcpPacket::parse_tcp(&packet.payload)
+        .map_err(|e| TcpError::ConnectionError { message: format!("Error parsing packet. Source: {}", e) })?;
       // NOTE: src_ip and dest_ip and ports are FLIPPED because we want to check if the dest_ip is our source_ip, etc. 
       let socket_key = SocketKey {
-        local_ip: Some(dst_ip),
+        local_ip: Some(packet.dst_ip),
         local_port: Some(tcp_packet.dst_port),
-        remote_ip: Some(src_ip),
+        remote_ip: Some(packet.src_ip),
         remote_port: Some(tcp_packet.src_port),
       };
 
@@ -323,13 +323,13 @@ impl Tcp {
               
               if !already_exists {
                   // Add connection if not already present
+                  // Connection should contain values that should be values of the new connection
                   let connection = Connection {
                       socket_key,
-                      seq_num: tcp_packet.seq_num,
-                      ack_num: tcp_packet.ack_num,
+                      seq_num: tcp_packet.ack_num,
+                      ack_num: tcp_packet.seq_num,
                       window: tcp_packet.window,
                   };
-                  println!("{:?}", (tcp_packet.ack_num, tcp_packet.seq_num));
                   listen_conn.add_connection(connection); // Safe to call `add_connection` here
               }
             })
@@ -345,7 +345,8 @@ impl Tcp {
               // If so, then proceed with connect (send the ACK) and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
-                *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num, tcp_packet.window);
+                lock.lock().unwrap().update(SocketStatus::Established, tcp_packet.ack_num, 
+                  tcp_packet.seq_num, Some(tcp_packet.window));
 
                 // Notify waiting threads that a new connection is available
                 cvar.notify_all(); // changed one to all
@@ -366,7 +367,8 @@ impl Tcp {
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
                 {
-                  *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.seq_num, tcp_packet.ack_num, tcp_packet.window);
+                  lock.lock().unwrap().update(SocketStatus::Established, tcp_packet.ack_num, 
+                    tcp_packet.seq_num, Some(tcp_packet.window));
                 }
                 // Notify waiting threads that a new connection is available
                 cvar.notify_all(); // changed one to all
@@ -380,7 +382,8 @@ impl Tcp {
               // If there is data in the payload, then the receive_buffer should be changed.
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
-                *lock.lock().unwrap() = (SocketStatus::Established, tcp_packet.ack_num, tcp_packet.seq_num, tcp_packet.window);
+                lock.lock().unwrap().update(SocketStatus::Established, 
+                  tcp_packet.ack_num, tcp_packet.seq_num, Some(tcp_packet.window));
 
                 stream.send_buffer.0.lock().unwrap().acknowledge(tcp_packet.ack_num);
 
@@ -388,7 +391,7 @@ impl Tcp {
 
                 // TODO: SET NXT VALUE
                 // TODO: THINK OF A BETTER WAY TO GET THE VALUES OF THE ACK RESPONSE PACKET
-                if recv_buf.nxt != tcp_packet.seq_num {
+                if recv_buf.nxt != tcp_packet.seq_num && tcp_packet.payload.len() != 0{
                   println!("{} != {}", recv_buf.nxt, tcp_packet.seq_num);
                   let bytes_written = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
                   let status = lock.lock().unwrap();
@@ -397,11 +400,11 @@ impl Tcp {
                   let ack_response = TcpPacket::new_ack(
                     src_port,
                     dst_port, 
-                    status.1.clone(), 
-                    status.2.clone() + bytes_written as u32, 
-                    status.3.clone() - bytes_written as u16, 
+                    status.seq_num.clone(), 
+                    status.ack_num.clone() + bytes_written as u32, 
+                    status.window_size.clone() - bytes_written as u16, 
                     Vec::new());
-                  self.send_packet(ack_response, src_ip);
+                  self.send_packet(ack_response, packet.src_ip);
                 }
               }
             } else if socket.status == SocketStatus::FinWait1 {
