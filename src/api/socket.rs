@@ -115,11 +115,12 @@ impl TcpListener {
             connection.ack_num + 1, 
             connection.socket_key.clone()))
       };
-      
+
       // Send SYN + ACK packet
       let syn_ack_packet = TcpPacket::new_syn_ack(port, 
       dst_port, connection.seq_num, connection.ack_num + 1);
       tcp.send_packet(syn_ack_packet, dst_ip);
+
       // update socket table
       {
         let mut socket_table = tcp.socket_table.lock().unwrap();
@@ -162,6 +163,24 @@ impl TcpListener {
         })?;
       // Your operations on `socket` here
       socket.status = SocketStatus::Established;
+
+      // !!! BUFFER INITIALIZATION HERE !!!
+      {
+        if let TcpSocket::Stream(stream) = &mut socket.tcp_socket {
+          let mut send_buffer = stream.send_buffer.0.lock().unwrap();
+          let mut recv_buffer = stream.receive_buffer.0.lock().unwrap();
+
+          send_buffer.lbw = connection.seq_num - 1;
+          send_buffer.nxt = connection.seq_num;
+          send_buffer.una = connection.seq_num;
+          
+          // ????????????
+          recv_buffer.lbr = connection.ack_num;
+          recv_buffer.nxt = connection.ack_num;
+          println!("Initialized send and receive buffers with connection seq/ack info");
+          println!("recv buffer lbr: {}", recv_buffer.lbr);
+        }
+    }
       Ok(socket.clone())
     };
   result
@@ -362,6 +381,7 @@ impl TcpStream {
     // Send ACK packet
     let packet = TcpPacket::new(port, dst_port, seq_num + 1, ack_num + 1, 
       TcpFlags::ACK, Vec::new());
+      println!("seq num: {}", seq_num);
     {
       let tcp = tcp_clone.lock().unwrap();
       tcp.send_packet(packet, dst_ip);
@@ -371,8 +391,24 @@ impl TcpStream {
         TcpError::StreamError { message: "Could not retrieve TcpStream from socket table.".to_string() }
       )?;
       socket.status = SocketStatus::Established;
+
+      // !!! INITIALIZE BUFFERS HERE !!!
+      {
+        if let TcpSocket::Stream(stream) = &mut socket.tcp_socket {
+          let mut send_buffer = stream.send_buffer.0.lock().unwrap();
+          let mut receive_buffer = stream.receive_buffer.0.lock().unwrap();
+          send_buffer.lbw = seq_num;
+          send_buffer.nxt = seq_num + 1;
+          send_buffer.una = seq_num + 1;
+
+          receive_buffer.lbr = ack_num;
+          receive_buffer.nxt = ack_num + 1;
+          println!("Initialized send and receive buffers with sequence and acknowledgment numbers.");
+        }
+      };
       if let TcpSocket::Stream(stream) = &socket.tcp_socket {
         println!("Created new socket with ID {}", socket.socket_id);
+        
         return Ok(stream.clone());
       };
     }
@@ -385,8 +421,9 @@ impl TcpStream {
   pub fn read(&mut self, bytes_to_read: u32) -> Result<Vec<u8>, TcpError> {
       let mut recv_buffer = self.receive_buffer.0.lock().unwrap();
       
-      let available_bytes = recv_buffer.nxt.wrapping_sub(recv_buffer.lbr);
+      let available_bytes = recv_buffer.nxt.wrapping_sub(recv_buffer.lbr).wrapping_add(1);
       let lbr = recv_buffer.lbr;
+      println!("lbr: {}", lbr);
       let bytes_to_return = std::cmp::min(available_bytes, bytes_to_read);
 
       if bytes_to_return == 0 {
@@ -394,9 +431,11 @@ impl TcpStream {
         // BLOCK
       }
 
-      let data = recv_buffer.buffer.read(lbr, bytes_to_return);
+      // want to start reading from lbr + 1, first non read byte
+      let data = recv_buffer.buffer.read(lbr + 1, bytes_to_return);
       println!("{:?}",data);
-      recv_buffer.lbr = recv_buffer.lbr.wrapping_add(bytes_to_return);
+      // recv_buffer.lbr = recv_buffer.lbr.wrapping_add(bytes_to_return);
+      recv_buffer.consume(bytes_to_return);
       Ok(data)
   }
 
@@ -423,7 +462,7 @@ impl TcpStream {
       {
         let mut send = buffer_lock.lock().unwrap();
         send = cvar.wait(send).unwrap();
-        bytes_to_send = send.lbw.wrapping_sub(send.nxt) as i64;
+        bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
       }
       
       let tcp = Arc::clone(&tcp_clone);
@@ -433,9 +472,11 @@ impl TcpStream {
         let mut send = buffer_lock.lock().unwrap();
         { 
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
-          
+          // TEMPORARY CHANGE: WINDOW SIZE SHOULD BE LBW 
           available_bytes = self.status.0.lock().unwrap().window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
+          // available_bytes = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
           println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
+          // println!("available bytes: {} = lbw: {} - nxt: {}", available_bytes, send.lbw, send.nxt);
         }
 
         if available_bytes <= 0 {
@@ -476,7 +517,7 @@ impl TcpStream {
           let safe_tcp = tcp.lock().unwrap();
           safe_tcp.send_packet(packet, self.socket_key.remote_ip.unwrap());
         }
-      
+    
         // Adjust send.nxt
         send.nxt += send_bytes_length as u32;
         // Recalculate bytes_to_send

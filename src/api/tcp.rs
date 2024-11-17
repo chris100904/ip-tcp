@@ -393,6 +393,7 @@ impl Tcp {
                 // TODO: THINK OF A BETTER WAY TO GET THE VALUES OF THE ACK RESPONSE PACKET
                 if recv_buf.nxt != tcp_packet.seq_num && tcp_packet.payload.len() != 0{
                   println!("{} != {}", recv_buf.nxt, tcp_packet.seq_num);
+                  println!("ACK: {}", tcp_packet.ack_num);
                   let bytes_written = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
                   let status = lock.lock().unwrap();
                   let src_port = tcp_packet.dst_port;

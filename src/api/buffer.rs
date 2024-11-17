@@ -43,13 +43,15 @@ impl SendBuffer {
     // need to only be able to write as much as we can (can't overfill the buffer) 
     let bytes_to_write = std::cmp::min(data.len(), available_space); 
 
-    let bytes_written = self.buffer.write(self.lbw, &data[..bytes_to_write]);
+    // use lbw + 1 because we want to start at the next one, lbw currently points to somewhere that was already written
+    let bytes_written = self.buffer.write(self.lbw + 1, &data[..bytes_to_write]);
     // // temp fix to off by 1 issue
     // if self.lbw == 0 {
     //   bytes_written -= 1;
     // }
+    // should lbw be set here?
     self.lbw = self.lbw.wrapping_add(bytes_written as u32); 
-    println!("lbw: {}, nxt: {}", self.lbw, self.nxt);
+    println!("lbw: {}, nxt: {}, una: {}", self.lbw, self.nxt, self.una);
     bytes_written
   }
 
@@ -94,22 +96,24 @@ impl ReceiveBuffer {
   // Write data into the receive buffer.
   // Returns the number of bytes written. If no space is available, returns 0.
   pub fn write(&mut self, data_seq: u32, data: &[u8]) -> usize {
-    // lbr needs to be changed initially... 
-    if self.lbr == 0 {
-        self.lbr = data_seq;
-    }
+    // // lbr needs to be changed initially... 
+    // if self.lbr == 0 {
+    //     self.lbr = data_seq;
+    // }
     let available_space = self.wnd.wrapping_sub(self.nxt.wrapping_sub(self.lbr) as u16) as usize;
     let bytes_to_write = std::cmp::min(data.len(), available_space);
 
     if bytes_to_write == 0{
         return 0; // no space available, cannot write anything 
     }
-
+    println!("BEFORE lbr: {}, nxt: {}, data_seq: {}", self.lbr, self.nxt, data_seq);
+    
     let bytes_written = self.buffer.write(data_seq, &data[..bytes_to_write]);
 
     // Update nxt to reflect the last byte received 
     self.nxt = data_seq.wrapping_add(bytes_written as u32);
 
+    println!("AFTER lbr: {}, nxt: {}, data_seq: {}", self.lbr, self.nxt, data_seq);
     bytes_written
   }
 
@@ -161,9 +165,11 @@ impl CircularBuffer {
             let index = self.seq_to_index(current_seq);
             self.buffer[index] = byte;
 
+            println!("current_seq: {}", current_seq);
             current_seq = current_seq.wrapping_add(1);
             bytes_written += 1
         }
+        println!("current_seq: {}", current_seq);
         println!("{:?}", self.buffer[self.seq_to_index(current_seq) - 1 as usize]);
         bytes_written 
     }
@@ -187,11 +193,12 @@ impl CircularBuffer {
     pub fn read(&mut self, lbr: u32, len: u32) -> Vec<u8> {
         let mut data = Vec::new();
         let mut current_seq = lbr;
-
+        println!("len: {}", len);
         for _ in 0..len {
             let index = self.seq_to_index(current_seq);
             data.push(self.buffer[index]);
             current_seq = current_seq.wrapping_add(1);
+            println!("current_seq: {}", current_seq);
         }
 
         data
