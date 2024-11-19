@@ -32,6 +32,6 @@ pub enum TCPCommand {
   TCPReceive(u32, u32),
   TCPClose(u32),
   ListSockets,
-  SendFile(String, String, u32),
-  ReceiveFile(String, u32),
+  SendFile(String, Ipv4Addr, u16),
+  ReceiveFile(String, u16),
 }

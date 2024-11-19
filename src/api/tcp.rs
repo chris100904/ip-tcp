@@ -1,6 +1,8 @@
-use std::{collections::{HashMap, HashSet}, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}};
+use std::{collections::{HashMap, HashSet}, fs::File, io::{BufReader, Read, Write}, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}, u32::MAX};
 use std::thread;
 use rand::Rng;
+
+use crate::api::socket::MAX_SEGMENT_SIZE;
 
 use super::{error::TcpError, packet::{Packet, TcpFlags, TcpPacket}, socket::{self, Connection, TcpListener, TcpStream}, TCPCommand};
 
@@ -126,8 +128,8 @@ impl Tcp {
                       TCPCommand::TCPSend(socket_id, bytes) => Tcp::send_data(tcp_clone, socket_id, bytes),// safe_tcp.send_data(&socketId, &data),
                       TCPCommand::TCPReceive(socket_id, numbytes) => Tcp::receive_data(tcp_clone, socket_id, numbytes),// safe_tcp.receive_data(&socketId, &numbytes),
                       TCPCommand::TCPClose(socket_id) => todo!(),// safe_tcp.close_socket(&socketId),
-                      TCPCommand::SendFile(path, addr, port) => todo!(),// Tcp::send_file(tcp_clone, path, addr, port),
-                      TCPCommand::ReceiveFile(path, port) => todo!(),// safe_tcp.receive_file(&path, &port.parse().unwrap()),
+                      TCPCommand::SendFile(path, addr, port) => Tcp::send_file(tcp_clone, path, addr, port),
+                      TCPCommand::ReceiveFile(path, port) => Tcp::receive_file(tcp_clone, path, port),
                   };
                   if let Err(e) = result {
                     eprintln!("{e}");
@@ -181,6 +183,15 @@ impl Tcp {
       }
 
       // check if the socket is valid and established
+    /// * `tcp_clone` - An `Arc<Mutex<Tcp>>` handle to the TCP instance.
+    /// * `socket_id` - A `u32` identifying the target socket.
+    /// * `bytes` - A `u32` specifying the number of bytes to read.
+    ///
+    /// # Returns
+    ///
+    /// This function returns `Ok(())` on successful reading of bytes or an error
+    /// of type `TcpError` if the socket is invalid, not a stream, or if any other
+    /// operation fails.
       if socket.status != SocketStatus::Established {
         // whatever error here
         return Err(TcpError::ConnectionError { 
@@ -504,7 +515,80 @@ impl Tcp {
           );
       }
       Ok(())
+    }
 
+    pub fn send_file(tcp: Arc<Mutex<Self>>, file_path: String, addr: Ipv4Addr, port: u16) -> Result<(), TcpError> {
+      // Initiate handshake with connect
+      let mut stream = TcpStream::connect(Arc::clone(&tcp), addr, port)?;
+
+      // Open the file
+      let file = match File::open(&file_path) {
+        Ok(file) => file,
+        Err(e) => return Err(TcpError::FileError {
+          message: format!("Failed to open file: {}", e)
+        }),
+      };
+
+      let mut reader = BufReader::new(file);
+      let mut buffer = vec![0; MAX_SEGMENT_SIZE];
+
+      // Read and send file contents
+      loop {
+        match reader.read(&mut buffer) {
+          Ok(0) => break, // EOF
+          Ok(n) => {
+            stream.write(&buffer[..n])?;
+            // TODO: Handle potential packet loss and retransmission
+          },
+          Err(e) => return Err(TcpError::FileError {
+            message: format!("Error reading file: {}", e)
+          }),
+        }
+      }
+
+      // Close the connection
+      // stream.close();
+      todo!()
+    }
+
+    pub fn receive_file(tcp: Arc<Mutex<Self>>, file_path: String, port: u16) -> Result<(), TcpError> {
+      // Listen for incoming connections (handshake)
+      let listener = TcpListener::listen(Arc::clone(&tcp), port)?;
+      let stream = listener.accept(Arc::clone(&tcp))?;
+
+      // Open the destination file
+      let mut file = match File::create(&file_path) {
+        Ok(file) => file,
+        Err(e) => return Err(TcpError::FileError {
+          message: format!("Failed to create file: {}", e)
+        }),
+      };
+
+      // let mut buffer = vec![0; MAX_SEGMENT_SIZE];
+
+      let tcp_socket = stream.tcp_socket;
+      match tcp_socket {
+          TcpSocket::Listener(_) => {
+            //
+          }, 
+          TcpSocket::Stream(mut stream) => {
+            loop {
+              match stream.read(MAX_SEGMENT_SIZE as u32) {
+                Ok(data) if data.is_empty() => break, // EOF
+                Ok(data) => {
+                  file.write_all(&data).map_err(|e| TcpError::FileError { 
+                    message: format!("Error writing to file: {}", e) 
+                  })?;
+                },
+                Err(e) => return Err(e),
+              }
+            }
+          }
+        };
+      
+      // Close connection
+      // stream.close();
+      todo!()
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////////

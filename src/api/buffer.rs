@@ -130,6 +130,9 @@ impl ReceiveBuffer {
         self.process_out_of_order();
         // println!("AFTER lbr: {}, nxt: {}, data_seq: {}", self.lbr, self.nxt, data_seq);
         // println!("Buffer after write: {:?}", self.buffer.read(self.lbr + 1, self.nxt.wrapping_sub(self.lbr + 1)));
+
+        // Update window size
+        self.wnd = (BUFFER_SIZE - (self.nxt.wrapping_sub(self.lbr.wrapping_add(1)) as usize)) as u16;
         bytes_written
     } else if data_seq > self.nxt /* && data_seq < self.nxt.wrapping_add(self.wnd as u32) */{
         println!("OUT OF ORDER PACKET");
@@ -163,7 +166,9 @@ impl ReceiveBuffer {
     println!("BEFORE CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
     self.lbr = self.lbr.wrapping_add(bytes_read);
     println!("AFTER CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
-    // self.buffer.update_base_seq(self.lbr);
+
+    // Update window size
+    self.wnd = (BUFFER_SIZE - (self.nxt.wrapping_sub(self.lbr.wrapping_add(1)) as usize)) as u16;
   }
 }
 

@@ -12,4 +12,6 @@ pub enum TcpError {
     ConnectionError { message: String },
     #[error("REPL Error: {}", message)]
     ReplError { message: String },
+    #[error("File Error: {}", message)]
+    FileError { message: String },
 }

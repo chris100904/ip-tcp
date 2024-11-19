@@ -101,7 +101,29 @@ pub fn repl(sender: Sender<CommandType>) -> Result<()> {
                     "ls" => sender.send(CommandType::TCP(TCPCommand::ListSockets)).unwrap(),
                     "sf" => {
                         if args.len() == 4 {
-                            sender.send(CommandType::TCP(TCPCommand::SendFile(args[1].to_string(), args[2].to_string(), args[3].parse().unwrap()))).unwrap();
+                            // Attempt to parse the addr and port
+                            let connect: std::result::Result<(Ipv4Addr, u16), TcpError> = (||
+                                Ok((args[2].parse().map_err(|_| {
+                                    println!("Invalid IP addr: {}", args[2]);
+                                    TcpError::ReplError { message: "Invalid virtual IP".to_string() }
+                                })?,
+                                args[3].parse().map_err(|_| {
+                                    println!("Invalid port: {}", args[3]);
+                                    TcpError::ReplError { message: "Invalid port".to_string() }
+                                })?))
+                            )();
+                            match connect {
+                                Ok((addr, port)) => {
+                                    // If parsing was successful, send the command
+                                    sender
+                                        .send(CommandType::TCP(TCPCommand::SendFile(args[1].to_string(), addr, port)))
+                                        .unwrap();
+                                }
+                                Err(_) => {
+                                    // In case of an error, show usage information
+                                    println!("Usage: sf <file path> <addr> <port>");
+                                }
+                            }
                         } else {
                             println!("Usage: sf <file path> <addr> <port>");
                         }
