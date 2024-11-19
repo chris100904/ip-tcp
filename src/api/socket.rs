@@ -1,4 +1,3 @@
-use std::future::pending;
 use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap,  VecDeque};
@@ -170,13 +169,19 @@ impl TcpListener {
           let mut send_buffer = stream.send_buffer.0.lock().unwrap();
           let mut recv_buffer = stream.receive_buffer.0.lock().unwrap();
 
-          send_buffer.lbw = connection.seq_num - 1;
-          send_buffer.nxt = connection.seq_num;
-          send_buffer.una = connection.seq_num;
+          let stream_info = stream.status.0.lock().unwrap();
+
+          send_buffer.lbw = stream_info.seq_num - 1;
+          send_buffer.nxt = stream_info.seq_num;
+          send_buffer.una = stream_info.seq_num;
+
+          // send_buffer.lbw = connection.seq_num - 1;
+          // send_buffer.nxt = connection.seq_num;
+          // send_buffer.una = connection.seq_num;
           
           // ????????????
-          recv_buffer.lbr = connection.ack_num;
-          recv_buffer.nxt = connection.ack_num;
+          recv_buffer.lbr = stream_info.ack_num - 1; // ETHAN
+          recv_buffer.nxt = stream_info.ack_num;
           println!("Initialized send and receive buffers with connection seq/ack info");
           println!("recv buffer lbr: {}", recv_buffer.lbr);
         }
@@ -222,15 +227,15 @@ pub struct TcpStream {
   pub status: Arc<(Mutex<StreamInfo>, Condvar)>,
 
   pub socket_key: SocketKey,
-  // TODO: add a TcpStream struct to hold the TcpStream object    
+    
   // A buffer for reading data
   pub send_buffer: Arc<(Mutex<SendBuffer>, Condvar)>,  
   // A buffer for writing data
   pub receive_buffer: Arc<(Mutex<ReceiveBuffer>, Condvar)>,
+  
   // In the sending case, you might consider keeping track of what packets 
   // you've sent and the timings for those in order to support retransmission 
   // later on, and in the receiving case, you'll need to handle receiving packets out of order.
-  
   pub retransmission_queue: Arc<Mutex<VecDeque<RetransmissionEntry>>>,
 }
 
@@ -397,6 +402,8 @@ impl TcpStream {
         if let TcpSocket::Stream(stream) = &mut socket.tcp_socket {
           let mut send_buffer = stream.send_buffer.0.lock().unwrap();
           let mut receive_buffer = stream.receive_buffer.0.lock().unwrap();
+          
+          // seq_num and ack_num refer to the values in the original SYN packet sent
           send_buffer.lbw = seq_num;
           send_buffer.nxt = seq_num + 1;
           send_buffer.una = seq_num + 1;
@@ -404,6 +411,7 @@ impl TcpStream {
           receive_buffer.lbr = ack_num;
           receive_buffer.nxt = ack_num + 1;
           println!("Initialized send and receive buffers with sequence and acknowledgment numbers.");
+          println!("LBW: {}, NXT: {}, UNA: {}", send_buffer.lbw, send_buffer.nxt, send_buffer.una);
         }
       };
       if let TcpSocket::Stream(stream) = &socket.tcp_socket {
@@ -419,23 +427,40 @@ impl TcpStream {
 
   // TODO
   pub fn read(&mut self, bytes_to_read: u32) -> Result<Vec<u8>, TcpError> {
-      let mut recv_buffer = self.receive_buffer.0.lock().unwrap();
+      if bytes_to_read <= 0 {
+        return Err(TcpError::ReplError { message: "Must read at least one byte.".to_string() });
+      }
+      let (recv_lock, recv_cv) = &*self.receive_buffer;
+      let mut available_bytes: u32;
       
-      let available_bytes = recv_buffer.nxt.wrapping_sub(recv_buffer.lbr).wrapping_add(1);
-      let lbr = recv_buffer.lbr;
-      println!("lbr: {}", lbr);
+      loop {
+        let mut recv_buffer = recv_lock.lock().unwrap();
+        available_bytes = recv_buffer.nxt.wrapping_sub(recv_buffer.lbr.wrapping_add(1));
+        println!("{} = {} - {} + 1", available_bytes, recv_buffer.nxt, recv_buffer.lbr);
+        if available_bytes == 0 {
+          println!("Blocking! Line 440");
+          recv_buffer = recv_cv.wait(recv_buffer).unwrap();
+        } else {
+          println!("Escaped! Line 443");
+          break;
+        }
+      } 
       let bytes_to_return = std::cmp::min(available_bytes, bytes_to_read);
 
-      if bytes_to_return == 0 {
-        // handle if there is nothing
-        // BLOCK
-      }
-
+      let mut recv_buffer = recv_lock.lock().unwrap();
+      let lbr = recv_buffer.lbr;
+      println!("lbr: {}", lbr);
       // want to start reading from lbr + 1, first non read byte
       let data = recv_buffer.buffer.read(lbr + 1, bytes_to_return);
       println!("{:?}",data);
       // recv_buffer.lbr = recv_buffer.lbr.wrapping_add(bytes_to_return);
       recv_buffer.consume(bytes_to_return);
+      // let data = recv_buffer.buffer.read(lbr + 1, bytes_to_return);
+      // println!("{:?}",data);
+      // let data = recv_buffer.buffer.read(lbr + 1, bytes_to_return + 1);
+      // println!("{:?}",data);
+      // let data = recv_buffer.buffer.read(lbr + 2, bytes_to_return);
+      // println!("{:?}",data);
       Ok(data)
   }
 
@@ -458,18 +483,14 @@ impl TcpStream {
   pub fn send_bytes(&mut self, tcp_clone: Arc<Mutex<Tcp>>) {
     let (buffer_lock, cvar) = &*self.send_buffer;
     loop {
-      let mut bytes_to_send;
-      {
-        let mut send = buffer_lock.lock().unwrap();
-        send = cvar.wait(send).unwrap();
-        bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
-      }
-      
+      let mut send = buffer_lock.lock().unwrap();
+      send = cvar.wait(send).unwrap();
+      let mut bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
+
       let tcp = Arc::clone(&tcp_clone);
       let mut available_bytes: i64;
       // Check to see if there are bytes in the buffer that have not been sent yet
       while bytes_to_send > 0 {
-        let mut send = buffer_lock.lock().unwrap();
         { 
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
           // TEMPORARY CHANGE: WINDOW SIZE SHOULD BE LBW 
@@ -503,15 +524,16 @@ impl TcpStream {
         let wnd;
         {
           let stream_info = self.status.0.lock().unwrap();
-          seq_num = stream_info.seq_num;
+          seq_num = send.prev_lbw + 1;
           ack_num = stream_info.ack_num;
           wnd = self.receive_buffer.0.lock().unwrap().wnd;
         }
         
 
         let packet = TcpPacket::new_ack(self.socket_key.local_port.unwrap(), 
-        self.socket_key.remote_port.unwrap(),
-          seq_num, ack_num, wnd, send_bytes);
+          self.socket_key.remote_port.unwrap(),
+          seq_num, ack_num, wnd, send_bytes
+        );
 
         {
           let safe_tcp = tcp.lock().unwrap();

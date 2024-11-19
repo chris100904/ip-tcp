@@ -387,25 +387,28 @@ impl Tcp {
 
                 stream.send_buffer.0.lock().unwrap().acknowledge(tcp_packet.ack_num);
 
-                let mut recv_buf = stream.receive_buffer.0.lock().unwrap();
+                let (recv_lock, recv_cv) = &*stream.receive_buffer;
+                let mut recv_buf = recv_lock.lock().unwrap();
 
                 // TODO: SET NXT VALUE
                 // TODO: THINK OF A BETTER WAY TO GET THE VALUES OF THE ACK RESPONSE PACKET
-                if recv_buf.nxt != tcp_packet.seq_num && tcp_packet.payload.len() != 0{
-                  println!("{} != {}", recv_buf.nxt, tcp_packet.seq_num);
+                if tcp_packet.payload.len() != 0 {
+                  println!("NXT: {}, SEQ RECEIVED: {}", recv_buf.nxt, tcp_packet.seq_num);
                   println!("ACK: {}", tcp_packet.ack_num);
                   let bytes_written = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
-                  let status = lock.lock().unwrap();
-                  let src_port = tcp_packet.dst_port;
-                  let dst_port = tcp_packet.src_port;
-                  let ack_response = TcpPacket::new_ack(
-                    src_port,
-                    dst_port, 
-                    status.seq_num.clone(), 
-                    status.ack_num.clone() + bytes_written as u32, 
-                    status.window_size.clone() - bytes_written as u16, 
-                    Vec::new());
-                  self.send_packet(ack_response, packet.src_ip);
+                  recv_cv.notify_all();
+                  
+                  // let status = lock.lock().unwrap();
+                  // let src_port = tcp_packet.dst_port;
+                  // let dst_port = tcp_packet.src_port;
+                  // let ack_response = TcpPacket::new_ack(
+                  //   src_port,
+                  //   dst_port, 
+                  //   status.seq_num.clone(), 
+                  //   status.ack_num.clone() + bytes_written as u32, 
+                  //   status.window_size.clone() - bytes_written as u16, 
+                  //   Vec::new());
+                  // self.send_packet(ack_response, packet.src_ip);
                 }
               }
             } else if socket.status == SocketStatus::FinWait1 {

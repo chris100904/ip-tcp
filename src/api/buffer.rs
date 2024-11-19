@@ -2,9 +2,9 @@
 
 // use super::tcp::SocketStatus;
 
+use std::collections::BTreeMap;
+
 pub const BUFFER_SIZE: usize = 65536;
-
-
 
 #[derive(Clone, Debug)]
 pub struct SendBuffer {
@@ -13,6 +13,7 @@ pub struct SendBuffer {
   pub una: u32,
   pub nxt: u32,
   pub lbw: u32, 
+  pub prev_lbw: u32, // represents previous lbw value
 }
 
 impl SendBuffer {
@@ -22,6 +23,7 @@ impl SendBuffer {
       una: 0,
       nxt: 0,
       lbw: 0,
+      prev_lbw: 0,
     }
   }
 
@@ -31,12 +33,14 @@ impl SendBuffer {
       una: self.una, 
       nxt: self.nxt, 
       lbw: self.lbw,
+      prev_lbw: self.prev_lbw,
     }
   }
 
   // Write data to the send buffer.
   // Returns the number of bytes written. If the buffer is full, returns 0.
   pub fn write(&mut self, data: &[u8]) -> usize {
+    println!("before write lbw: {}, nxt: {}, una: {}, prev_lbw: {}", self.lbw, self.nxt, self.una, self.prev_lbw);
     // take amount of bytes written in buffer and subtract by total capacity
     let available_space = BUFFER_SIZE.wrapping_sub(self.lbw.wrapping_sub(self.una) as usize);
     
@@ -50,8 +54,9 @@ impl SendBuffer {
     //   bytes_written -= 1;
     // }
     // should lbw be set here?
+    self.prev_lbw = self.lbw;
     self.lbw = self.lbw.wrapping_add(bytes_written as u32); 
-    println!("lbw: {}, nxt: {}, una: {}", self.lbw, self.nxt, self.una);
+    println!("after lbw: {}, nxt: {}, una: {}, prev_lbw: {}", self.lbw, self.nxt, self.una, self.prev_lbw);
     bytes_written
   }
 
@@ -60,7 +65,7 @@ impl SendBuffer {
   pub fn acknowledge(&mut self, new_una: u32) { 
     if new_una > self.una {
         self.una = new_una;
-        self.buffer.update_base_seq(new_una);
+        // self.buffer.update_base_seq(new_una);
     }
   }
 }
@@ -72,6 +77,7 @@ pub struct ReceiveBuffer {
   pub nxt: u32,
   pub wnd: u16,
   pub lbr: u32,
+  pub out_of_order: BTreeMap<u32, Vec<u8>>,
 }
 
 impl ReceiveBuffer {
@@ -81,6 +87,7 @@ impl ReceiveBuffer {
       nxt: 0,
       wnd: 65535, 
       lbr: 0,
+      out_of_order: BTreeMap::new(),
     }
   }
 
@@ -90,6 +97,7 @@ impl ReceiveBuffer {
       nxt: self.nxt,
       wnd: self.wnd,
       lbr: self.lbr,
+      out_of_order: self.out_of_order.clone()
     }
   }
   
@@ -101,26 +109,61 @@ impl ReceiveBuffer {
     //     self.lbr = data_seq;
     // }
     let available_space = self.wnd.wrapping_sub(self.nxt.wrapping_sub(self.lbr) as u16) as usize;
+    println!("AVAILABLE SPACE: {} = WINDOW: {} - (NXT: {} - LBR: {})", available_space, self.wnd, self.nxt, self.lbr); 
     let bytes_to_write = std::cmp::min(data.len(), available_space);
 
-    if bytes_to_write == 0{
+    if bytes_to_write == 0 {
         return 0; // no space available, cannot write anything 
     }
-    println!("BEFORE lbr: {}, nxt: {}, data_seq: {}", self.lbr, self.nxt, data_seq);
+    // println!("BEFORE lbr: {}, nxt: {}, data_seq: {}", self.lbr, self.nxt, data_seq);
     
-    let bytes_written = self.buffer.write(data_seq, &data[..bytes_to_write]);
 
-    // Update nxt to reflect the last byte received 
-    self.nxt = data_seq.wrapping_add(bytes_written as u32);
+    if data_seq == self.nxt {
+        // In-order packet handling
+        println!("IN ORDER PACKET HANDLED HERE");
+        let bytes_written = self.buffer.write(data_seq, &data[..bytes_to_write]);
 
-    println!("AFTER lbr: {}, nxt: {}, data_seq: {}", self.lbr, self.nxt, data_seq);
-    bytes_written
+        // Update nxt to reflect the last byte received 
+        self.nxt = data_seq.wrapping_add(bytes_written as u32);
+
+        // in the case that a gap has been filled, we call process_out_of_order in order to check
+        self.process_out_of_order();
+        // println!("AFTER lbr: {}, nxt: {}, data_seq: {}", self.lbr, self.nxt, data_seq);
+        // println!("Buffer after write: {:?}", self.buffer.read(self.lbr + 1, self.nxt.wrapping_sub(self.lbr + 1)));
+        bytes_written
+    } else if data_seq > self.nxt /* && data_seq < self.nxt.wrapping_add(self.wnd as u32) */{
+        println!("OUT OF ORDER PACKET");
+        // Out-of-order packet within the receive window
+        self.out_of_order.insert(data_seq, data[..bytes_to_write].to_vec());
+        self.process_out_of_order();
+        bytes_to_write
+    } else {
+      println!("BAH");
+        // Packet outside the receive window, ignore (or whatever protocol we want to use)
+        0
+    }
+  }
+
+  // Check if there is a packet from the BTreeMap and write it into the buffer
+  fn process_out_of_order(&mut self) {
+    while let Some((&seq, data)) = self.out_of_order.first_key_value() {
+        if seq == self.nxt {
+            let bytes_written = self.buffer.write(seq, data);
+            self.nxt = self.nxt.wrapping_add(bytes_written as u32);
+  
+            self.out_of_order.remove(&seq);
+        } else {
+          break;
+        }
+    }
   }
 
   // Advance the left boundary of the receive buffer by `bytes_read` bytes. Used when reading
   pub fn consume(&mut self, bytes_read: u32) {
+    println!("BEFORE CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
     self.lbr = self.lbr.wrapping_add(bytes_read);
-    self.buffer.update_base_seq(self.lbr);
+    println!("AFTER CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
+    // self.buffer.update_base_seq(self.lbr);
   }
 }
 
@@ -128,7 +171,6 @@ impl ReceiveBuffer {
 pub struct CircularBuffer {
     pub buffer: Vec<u8>,
     capacity: usize,
-    base_seq: u32, // base sequence number for the first byte in the buffer that has been written into
 }
 
 impl CircularBuffer {
@@ -136,7 +178,6 @@ impl CircularBuffer {
         CircularBuffer {
             buffer: vec![0; BUFFER_SIZE],
             capacity: BUFFER_SIZE, 
-            base_seq: 0,
         }
     }
 
@@ -144,12 +185,11 @@ impl CircularBuffer {
       CircularBuffer {
         buffer: self.buffer.clone(),
         capacity: self.capacity,
-        base_seq: self.base_seq,
       }
     }
 
     pub fn seq_to_index(&self, seq: u32) -> usize {
-        ((seq.wrapping_sub(self.base_seq)) as usize) % self.capacity
+        (seq as usize) % self.capacity
     }
 
     // Writes data to the circular buffer starting at the given sequence number.
@@ -159,17 +199,20 @@ impl CircularBuffer {
         let mut current_seq = seq;
 
         for &byte in data {
-            if self.available_space() == 0 {
-                break; 
-            }
+          // in both send and receive, this is already being checked
+          // BUT IF THERE IS A PROBLEM WITH OVERFLOW, CHECK HERE FIRST
+            // if self.available_space() == 0 {
+            //     println!("IT IS BREAKING?????");
+            //     break; 
+            // }
             let index = self.seq_to_index(current_seq);
             self.buffer[index] = byte;
 
-            println!("current_seq: {}", current_seq);
+            println!("circ_buf: current_seq: {}, byte: {}", current_seq, byte);
             current_seq = current_seq.wrapping_add(1);
             bytes_written += 1
         }
-        println!("current_seq: {}", current_seq);
+        println!("NOT WRITTEN circ_buf: current_seq: {}", current_seq);
         println!("{:?}", self.buffer[self.seq_to_index(current_seq) - 1 as usize]);
         bytes_written 
     }
@@ -197,18 +240,13 @@ impl CircularBuffer {
         for _ in 0..len {
             let index = self.seq_to_index(current_seq);
             data.push(self.buffer[index]);
+            println!("read: current_seq: {}", current_seq);
             current_seq = current_seq.wrapping_add(1);
-            println!("current_seq: {}", current_seq);
         }
-
         data
     }
 
-    pub fn update_base_seq(&mut self, new_base_seq: u32) {
-        self.base_seq = new_base_seq;
-    }
-
-    pub fn available_space(&self) -> usize {
-        BUFFER_SIZE - (self.base_seq.wrapping_sub(self.base_seq) as usize)
-    }
+    // pub fn available_space(&self, start_point: u32, end_point: u32) -> usize {
+    //     BUFFER_SIZE - (end_point.wrapping_sub(start_point) as usize)
+    // }
 }
