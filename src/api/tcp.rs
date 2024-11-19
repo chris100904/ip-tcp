@@ -126,7 +126,7 @@ impl Tcp {
                       TCPCommand::TCPSend(socket_id, bytes) => Tcp::send_data(tcp_clone, socket_id, bytes),// safe_tcp.send_data(&socketId, &data),
                       TCPCommand::TCPReceive(socket_id, numbytes) => Tcp::receive_data(tcp_clone, socket_id, numbytes),// safe_tcp.receive_data(&socketId, &numbytes),
                       TCPCommand::TCPClose(socket_id) => todo!(),// safe_tcp.close_socket(&socketId),
-                      TCPCommand::SendFile(path, addr, port) => todo!(),// safe_tcp.send_file(&path, Ipv4Addr::from_str(addr).unwrap(), &port.parse().unwrap()),
+                      TCPCommand::SendFile(path, addr, port) => todo!(),// Tcp::send_file(tcp_clone, path, addr, port),
                       TCPCommand::ReceiveFile(path, port) => todo!(),// safe_tcp.receive_file(&path, &port.parse().unwrap()),
                   };
                   if let Err(e) = result {
@@ -384,8 +384,6 @@ impl Tcp {
                 let (lock, cvar) = &*stream.status;
                 lock.lock().unwrap().update(SocketStatus::Established, 
                   tcp_packet.ack_num, tcp_packet.seq_num, Some(tcp_packet.window));
-
-                stream.send_buffer.0.lock().unwrap().acknowledge(tcp_packet.ack_num);
 
                 let (recv_lock, recv_cv) = &*stream.receive_buffer;
                 let mut recv_buf = recv_lock.lock().unwrap();

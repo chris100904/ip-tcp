@@ -18,7 +18,7 @@ pub struct Connection {
   pub socket_key: SocketKey,
   pub seq_num: u32,
   pub ack_num: u32,
-  pub window: u16,
+  pub window: u16, // Represents the counterpart's expected receive window size
 }
 
 impl Connection {
@@ -241,10 +241,10 @@ pub struct TcpStream {
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct StreamInfo {
-  pub status: SocketStatus,
-  pub seq_num: u32,
-  pub ack_num: u32,
-  pub window_size: u16,
+  pub status: SocketStatus,  // Represents our status
+  pub seq_num: u32, // Represents the seq_num we would send
+  pub ack_num: u32, // Represents the ack_num we would send
+  pub window_size: u16, // Represents the counterpart's expected receive window size
 }
 
 impl StreamInfo {
