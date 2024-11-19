@@ -183,15 +183,6 @@ impl Tcp {
       }
 
       // check if the socket is valid and established
-    /// * `tcp_clone` - An `Arc<Mutex<Tcp>>` handle to the TCP instance.
-    /// * `socket_id` - A `u32` identifying the target socket.
-    /// * `bytes` - A `u32` specifying the number of bytes to read.
-    ///
-    /// # Returns
-    ///
-    /// This function returns `Ok(())` on successful reading of bytes or an error
-    /// of type `TcpError` if the socket is invalid, not a stream, or if any other
-    /// operation fails.
       if socket.status != SocketStatus::Established {
         // whatever error here
         return Err(TcpError::ConnectionError { 
