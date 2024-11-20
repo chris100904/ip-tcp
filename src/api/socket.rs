@@ -150,8 +150,8 @@ impl TcpListener {
         connection.seq_num + 1,connection.ack_num + 1) {
         pending_conns = pend_cvar.wait(pending_conns).unwrap(); 
       }
-      pending_conns.update(SocketStatus::Established, connection.seq_num + 1,
-         connection.ack_num + 1, Some(connection.window));
+      pending_conns.update(Some(SocketStatus::Established), Some(connection.seq_num + 1),
+         Some(connection.ack_num + 1), Some(connection.window));
     }
 
     let result = {
@@ -175,12 +175,7 @@ impl TcpListener {
           send_buffer.nxt = stream_info.seq_num;
           send_buffer.una = stream_info.seq_num;
 
-          // send_buffer.lbw = connection.seq_num - 1;
-          // send_buffer.nxt = connection.seq_num;
-          // send_buffer.una = connection.seq_num;
-          
-          // ????????????
-          recv_buffer.lbr = stream_info.ack_num - 1; // ETHAN
+          recv_buffer.lbr = stream_info.ack_num - 1;
           recv_buffer.nxt = stream_info.ack_num;
           println!("Initialized send and receive buffers with connection seq/ack info");
           println!("recv buffer lbr: {}", recv_buffer.lbr);
@@ -262,11 +257,17 @@ impl StreamInfo {
     return self.status == status && self.seq_num == seq_num && self.ack_num == ack_num;
   }
 
-  pub fn update(&mut self, status: SocketStatus, seq_num: u32, 
-    ack_num: u32, window_size: Option<u16>) {
-      self.status = status;
-      self.seq_num = seq_num;
-      self.ack_num = ack_num;
+  pub fn update(&mut self, status: Option<SocketStatus>, seq_num: Option<u32>, 
+    ack_num: Option<u32>, window_size: Option<u16>) {
+      if let Some(status) = status {
+        self.status = status;
+      }
+      if let Some(seq_num) = seq_num {
+        self.seq_num = seq_num;
+      }
+      if let Some(ack_num) = ack_num {
+        self.ack_num = ack_num;
+      }
       if let Some(window_size) = window_size {
         self.window_size = window_size;
       }
@@ -365,8 +366,8 @@ impl TcpStream {
 
       if let Some(result) = timeout_result {
         if !result.timed_out() {
-          pending_conns.update(SocketStatus::Established, seq_num + 1, 
-            ack_num + 1, None);
+          pending_conns.update(Some(SocketStatus::Established), Some(seq_num + 1), 
+            Some(ack_num + 1), None);
           break;
         } else {
           let tcp = tcp_clone.lock().unwrap();
@@ -455,12 +456,6 @@ impl TcpStream {
       println!("{:?}",data);
       // recv_buffer.lbr = recv_buffer.lbr.wrapping_add(bytes_to_return);
       recv_buffer.consume(bytes_to_return);
-      // let data = recv_buffer.buffer.read(lbr + 1, bytes_to_return);
-      // println!("{:?}",data);
-      // let data = recv_buffer.buffer.read(lbr + 1, bytes_to_return + 1);
-      // println!("{:?}",data);
-      // let data = recv_buffer.buffer.read(lbr + 2, bytes_to_return);
-      // println!("{:?}",data);
       Ok(data)
   }
 

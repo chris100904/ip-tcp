@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-pub const BUFFER_SIZE: usize = 65536;
+pub const BUFFER_SIZE: usize = 65535;
 
 #[derive(Clone, Debug)]
 pub struct SendBuffer {
@@ -85,7 +85,7 @@ impl ReceiveBuffer {
     ReceiveBuffer {
       buffer: CircularBuffer::new(),
       nxt: 0,
-      wnd: 65535, 
+      wnd: BUFFER_SIZE.try_into().unwrap(), 
       lbr: 0,
       out_of_order: BTreeMap::new(),
     }
@@ -132,7 +132,10 @@ impl ReceiveBuffer {
         // println!("Buffer after write: {:?}", self.buffer.read(self.lbr + 1, self.nxt.wrapping_sub(self.lbr + 1)));
 
         // Update window size
+        println!("PREV WND: {}", self.wnd);
         self.wnd = (BUFFER_SIZE - (self.nxt.wrapping_sub(self.lbr.wrapping_add(1)) as usize)) as u16;
+        println!("WND: {} = BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", self.wnd, BUFFER_SIZE, self.nxt, self.lbr);
+        println!("POST WND: {}", self.wnd);
         bytes_written
     } else if data_seq > self.nxt /* && data_seq < self.nxt.wrapping_add(self.wnd as u32) */{
         println!("OUT OF ORDER PACKET");
