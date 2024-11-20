@@ -40,7 +40,7 @@ impl SendBuffer {
   // Write data to the send buffer.
   // Returns the number of bytes written. If the buffer is full, returns 0.
   pub fn write(&mut self, data: &[u8]) -> usize {
-    println!("before write lbw: {}, nxt: {}, una: {}, prev_lbw: {}", self.lbw, self.nxt, self.una, self.prev_lbw);
+    // println!("before write lbw: {}, nxt: {}, una: {}, prev_lbw: {}", self.lbw, self.nxt, self.una, self.prev_lbw);
     // take amount of bytes written in buffer and subtract by total capacity
     let available_space = BUFFER_SIZE.wrapping_sub(self.lbw.wrapping_sub(self.una) as usize);
     
@@ -56,7 +56,7 @@ impl SendBuffer {
     // should lbw be set here?
     self.prev_lbw = self.lbw;
     self.lbw = self.lbw.wrapping_add(bytes_written as u32); 
-    println!("after lbw: {}, nxt: {}, una: {}, prev_lbw: {}", self.lbw, self.nxt, self.una, self.prev_lbw);
+    // println!("after lbw: {}, nxt: {}, una: {}, prev_lbw: {}", self.lbw, self.nxt, self.una, self.prev_lbw);
     bytes_written
   }
 
@@ -109,7 +109,7 @@ impl ReceiveBuffer {
     //     self.lbr = data_seq;
     // }
     let available_space = self.wnd.wrapping_sub(self.nxt.wrapping_sub(self.lbr) as u16) as usize;
-    println!("AVAILABLE SPACE: {} = WINDOW: {} - (NXT: {} - LBR: {})", available_space, self.wnd, self.nxt, self.lbr); 
+    // println!("AVAILABLE SPACE: {} = WINDOW: {} - (NXT: {} - LBR: {})", available_space, self.wnd, self.nxt, self.lbr); 
     let bytes_to_write = std::cmp::min(data.len(), available_space);
 
     if bytes_to_write == 0 {
@@ -120,7 +120,7 @@ impl ReceiveBuffer {
 
     if data_seq == self.nxt {
         // In-order packet handling
-        println!("IN ORDER PACKET HANDLED HERE");
+        // println!("IN ORDER PACKET HANDLED HERE");
         let bytes_written = self.buffer.write(data_seq, &data[..bytes_to_write]);
 
         // Update nxt to reflect the last byte received 
@@ -132,19 +132,19 @@ impl ReceiveBuffer {
         // println!("Buffer after write: {:?}", self.buffer.read(self.lbr + 1, self.nxt.wrapping_sub(self.lbr + 1)));
 
         // Update window size
-        println!("PREV WND: {}", self.wnd);
+        // println!("PREV WND: {}", self.wnd);
         self.wnd = (BUFFER_SIZE - (self.nxt.wrapping_sub(self.lbr.wrapping_add(1)) as usize)) as u16;
-        println!("WND: {} = BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", self.wnd, BUFFER_SIZE, self.nxt, self.lbr);
-        println!("POST WND: {}", self.wnd);
+        // println!("WND: {} = BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", self.wnd, BUFFER_SIZE, self.nxt, self.lbr);
+        // println!("POST WND: {}", self.wnd);
         bytes_written
     } else if data_seq > self.nxt /* && data_seq < self.nxt.wrapping_add(self.wnd as u32) */{
-        println!("OUT OF ORDER PACKET");
+        // println!("OUT OF ORDER PACKET");
         // Out-of-order packet within the receive window
         self.out_of_order.insert(data_seq, data[..bytes_to_write].to_vec());
         self.process_out_of_order();
         bytes_to_write
     } else {
-      println!("BAH");
+      // println!("BAH");
         // Packet outside the receive window, ignore (or whatever protocol we want to use)
         0
     }
@@ -166,9 +166,9 @@ impl ReceiveBuffer {
 
   // Advance the left boundary of the receive buffer by `bytes_read` bytes. Used when reading
   pub fn consume(&mut self, bytes_read: u32) {
-    println!("BEFORE CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
+    // println!("BEFORE CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
     self.lbr = self.lbr.wrapping_add(bytes_read);
-    println!("AFTER CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
+    // println!("AFTER CONSUME LBR: {}, BYTES_READ: {}", self.lbr, bytes_read);
 
     // Update window size
     self.wnd = (BUFFER_SIZE - (self.nxt.wrapping_sub(self.lbr.wrapping_add(1)) as usize)) as u16;
@@ -216,12 +216,12 @@ impl CircularBuffer {
             let index = self.seq_to_index(current_seq);
             self.buffer[index] = byte;
 
-            println!("circ_buf: current_seq: {}, byte: {}", current_seq, byte);
+            // println!("circ_buf: current_seq: {}, byte: {}", current_seq, byte);
             current_seq = current_seq.wrapping_add(1);
             bytes_written += 1
         }
-        println!("NOT WRITTEN circ_buf: current_seq: {}", current_seq);
-        println!("{:?}", self.buffer[self.seq_to_index(current_seq) - 1 as usize]);
+        // println!("NOT WRITTEN circ_buf: current_seq: {}", current_seq);
+        // println!("{:?}", self.buffer[self.seq_to_index(current_seq) - 1 as usize]);
         bytes_written 
     }
     
@@ -244,11 +244,11 @@ impl CircularBuffer {
     pub fn read(&mut self, lbr: u32, len: u32) -> Vec<u8> {
         let mut data = Vec::new();
         let mut current_seq = lbr;
-        println!("len: {}", len);
+        // println!("len: {}", len);
         for _ in 0..len {
             let index = self.seq_to_index(current_seq);
             data.push(self.buffer[index]);
-            println!("read: current_seq: {}", current_seq);
+            // println!("read: current_seq: {}", current_seq);
             current_seq = current_seq.wrapping_add(1);
         }
         data

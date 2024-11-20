@@ -103,11 +103,15 @@ pub fn receive_tcp_packet(tcp_clone: Arc<Mutex<Tcp>>, tcp_recv_ip: Receiver<(Pac
               safe_tcp.receive_packet(packet);
               break;
             }
-            Err(e) => {}
+            Err(e) => {
+              eprintln!("Vhost 107");
+            }
           }
         }
       },
-      Err(e) => {}
+      Err(e) => {
+        eprintln!("Vhost 113");
+      }
     }
   }
 }

@@ -121,7 +121,7 @@ impl Tcp {
         let tcp_clone = Arc::clone(&tcp);
           match receiver.recv() {
               Ok(command) => {
-                  let result = match command {
+                  let result: Result<_, TcpError> = match command {
                       TCPCommand::ListenAccept(port) => Tcp::listen_and_accept(tcp_clone, port),
                       TCPCommand::TCPConnect(vip, port) => Tcp::connect(&tcp, vip, port),
                       TCPCommand::ListSockets => tcp.lock().unwrap().list_sockets(),
@@ -516,15 +516,18 @@ impl Tcp {
       let mut stream = TcpStream::connect(Arc::clone(&tcp), addr, port)?;
 
       // Open the file
-      let file = match File::open(&file_path) {
-        Ok(file) => file,
-        Err(e) => return Err(TcpError::FileError {
-          message: format!("Failed to open file: {}", e)
-        }),
-      };
+      let file = File::open(&file_path).map_err(|e| TcpError::FileError {
+        message: format!("Failed to open file: {}", e)
+      })?;
 
       let mut reader = BufReader::new(file);
       let mut buffer = vec![0; MAX_SEGMENT_SIZE];
+
+      let tcp_clone_2 = Arc::clone(&tcp);
+      let mut stream_clone = stream.clone();
+      thread::spawn( move || {
+        stream_clone.send_bytes(tcp_clone_2);
+      });
 
       // Read and send file contents
       loop {
@@ -532,7 +535,6 @@ impl Tcp {
           Ok(0) => break, // EOF
           Ok(n) => {
             stream.write(&buffer[..n])?;
-            // TODO: Handle potential packet loss and retransmission
           },
           Err(e) => return Err(TcpError::FileError {
             message: format!("Error reading file: {}", e)
@@ -542,13 +544,19 @@ impl Tcp {
 
       // Close the connection
       // stream.close();
-      todo!()
+      Ok(())
     }
 
     pub fn receive_file(tcp: Arc<Mutex<Self>>, file_path: String, port: u16) -> Result<(), TcpError> {
       // Listen for incoming connections (handshake)
       let listener = TcpListener::listen(Arc::clone(&tcp), port)?;
-      let stream = listener.accept(Arc::clone(&tcp))?;
+      let socket = listener.accept(Arc::clone(&tcp))?;
+      if let TcpSocket::Stream(mut stream) = socket.tcp_socket.clone() {
+        let tcp_clone_2 = Arc::clone(&tcp);
+        thread::spawn( move || {
+          stream.send_bytes(tcp_clone_2);
+        });
+      }
 
       // Open the destination file
       let mut file = match File::create(&file_path) {
@@ -558,31 +566,24 @@ impl Tcp {
         }),
       };
 
-      // let mut buffer = vec![0; MAX_SEGMENT_SIZE];
-
-      let tcp_socket = stream.tcp_socket;
-      match tcp_socket {
-          TcpSocket::Listener(_) => {
-            //
-          }, 
-          TcpSocket::Stream(mut stream) => {
-            loop {
-              match stream.read(MAX_SEGMENT_SIZE as u32) {
-                Ok(data) if data.is_empty() => break, // EOF
-                Ok(data) => {
-                  file.write_all(&data).map_err(|e| TcpError::FileError { 
-                    message: format!("Error writing to file: {}", e) 
-                  })?;
-                },
-                Err(e) => return Err(e),
-              }
-            }
+      let tcp_socket = socket.tcp_socket;
+      if let TcpSocket::Stream(mut stream) = tcp_socket {
+        loop {
+          match stream.read(MAX_SEGMENT_SIZE as u32) {
+            // how to exit this loop
+            Ok(data) => {
+              file.write_all(&data).map_err(|e| TcpError::FileError { 
+                message: format!("Error writing to file: {}", e) 
+              })?;
+            },
+            Err(e) => return Err(e),
           }
-        };
+        }
+      }
       
-      // Close connection
+      // Close connection when FIN is received
       // stream.close();
-      todo!()
+      Ok(())
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////////

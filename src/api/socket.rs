@@ -426,7 +426,6 @@ impl TcpStream {
     });
   }
 
-  // TODO
   pub fn read(&mut self, bytes_to_read: u32) -> Result<Vec<u8>, TcpError> {
       if bytes_to_read <= 0 {
         return Err(TcpError::ReplError { message: "Must read at least one byte.".to_string() });
@@ -479,7 +478,9 @@ impl TcpStream {
     let (buffer_lock, cvar) = &*self.send_buffer;
     loop {
       let mut send = buffer_lock.lock().unwrap();
+      println!("Waiting...");
       send = cvar.wait(send).unwrap();
+      println!("Escaped!");
       let mut bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
 
       let tcp = Arc::clone(&tcp_clone);
@@ -518,8 +519,9 @@ impl TcpStream {
         let ack_num;
         let wnd;
         {
-          let stream_info = self.status.0.lock().unwrap();
-          seq_num = send.prev_lbw + 1;
+          let mut stream_info = self.status.0.lock().unwrap();
+          stream_info.update(None, Some(send.prev_lbw + 1), None, None);
+          seq_num = stream_info.seq_num;
           ack_num = stream_info.ack_num;
           wnd = self.receive_buffer.0.lock().unwrap().wnd;
         }
