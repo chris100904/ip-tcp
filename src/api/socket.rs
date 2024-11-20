@@ -177,8 +177,8 @@ impl TcpListener {
 
           recv_buffer.lbr = stream_info.ack_num - 1;
           recv_buffer.nxt = stream_info.ack_num;
-          println!("Initialized send and receive buffers with connection seq/ack info");
-          println!("recv buffer lbr: {}", recv_buffer.lbr);
+          // println!("Initialized send and receive buffers with connection seq/ack info");
+          // println!("recv buffer lbr: {}", recv_buffer.lbr);
         }
     }
       Ok(socket.clone())
@@ -217,15 +217,15 @@ pub struct RetransmissionEntry {
 
 #[derive(Clone, Debug)]
 pub struct TcpStream {
-  // May not need to be arc mutexed.
-  // Represents SocketStatus, seq_num, ack_num
+  // Condvar has two uses: notify received packet during handshake, 
+  // and notify received packet during zero-window probing
   pub status: Arc<(Mutex<StreamInfo>, Condvar)>,
 
   pub socket_key: SocketKey,
     
-  // A buffer for reading data
+  // A buffer for reading data; Condvar is to notify the sending thread that buffer has been written into.
   pub send_buffer: Arc<(Mutex<SendBuffer>, Condvar)>,  
-  // A buffer for writing data
+  // A buffer for writing data; Condvar is for a blocking read
   pub receive_buffer: Arc<(Mutex<ReceiveBuffer>, Condvar)>,
   
   // In the sending case, you might consider keeping track of what packets 
@@ -240,6 +240,7 @@ pub struct StreamInfo {
   pub seq_num: u32, // Represents the seq_num we would send
   pub ack_num: u32, // Represents the ack_num we would send
   pub window_size: u16, // Represents the counterpart's expected receive window size
+  // pub zwp_interval: u16, // Represents zero-window probe time interval
 }
 
 impl StreamInfo {
@@ -387,7 +388,7 @@ impl TcpStream {
     // Send ACK packet
     let packet = TcpPacket::new(port, dst_port, seq_num + 1, ack_num + 1, 
       TcpFlags::ACK, Vec::new());
-      println!("seq num: {}", seq_num);
+      // println!("seq num: {}", seq_num);
     {
       let tcp = tcp_clone.lock().unwrap();
       tcp.send_packet(packet, dst_ip);
@@ -411,8 +412,8 @@ impl TcpStream {
 
           receive_buffer.lbr = ack_num;
           receive_buffer.nxt = ack_num + 1;
-          println!("Initialized send and receive buffers with sequence and acknowledgment numbers.");
-          println!("LBW: {}, NXT: {}, UNA: {}", send_buffer.lbw, send_buffer.nxt, send_buffer.una);
+          // println!("Initialized send and receive buffers with sequence and acknowledgment numbers.");
+          // println!("LBW: {}, NXT: {}, UNA: {}", send_buffer.lbw, send_buffer.nxt, send_buffer.una);
         }
       };
       if let TcpSocket::Stream(stream) = &socket.tcp_socket {
@@ -436,7 +437,7 @@ impl TcpStream {
       loop {
         let mut recv_buffer = recv_lock.lock().unwrap();
         available_bytes = recv_buffer.nxt.wrapping_sub(recv_buffer.lbr.wrapping_add(1));
-        println!("{} = {} - {} + 1", available_bytes, recv_buffer.nxt, recv_buffer.lbr);
+        // println!("{} = {} - {} + 1", available_bytes, recv_buffer.nxt, recv_buffer.lbr);
         if available_bytes == 0 {
           println!("Blocking! Line 440");
           recv_buffer = recv_cv.wait(recv_buffer).unwrap();
@@ -449,10 +450,10 @@ impl TcpStream {
 
       let mut recv_buffer = recv_lock.lock().unwrap();
       let lbr = recv_buffer.lbr;
-      println!("lbr: {}", lbr);
+      // println!("lbr: {}", lbr);
       // want to start reading from lbr + 1, first non read byte
       let data = recv_buffer.buffer.read(lbr + 1, bytes_to_return);
-      println!("{:?}",data);
+      // println!("{:?}",data);
       // recv_buffer.lbr = recv_buffer.lbr.wrapping_add(bytes_to_return);
       recv_buffer.consume(bytes_to_return);
       Ok(data)
@@ -476,29 +477,61 @@ impl TcpStream {
   // Called on a separate thread.
   pub fn send_bytes(&mut self, tcp_clone: Arc<Mutex<Tcp>>) {
     let (buffer_lock, cvar) = &*self.send_buffer;
-    loop {
-      let mut send = buffer_lock.lock().unwrap();
-      println!("Waiting...");
-      send = cvar.wait(send).unwrap();
-      println!("Escaped!");
-      let mut bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
+    let mut last_probe_time = Instant::now();
+    let rto_min;
+    let rto_max;
+    {
+      let safe_tcp = tcp_clone.lock().unwrap();
+      rto_max = safe_tcp.rto_max;
+      rto_min = safe_tcp.rto_min;
+    }
 
+
+    loop {
+      let mut bytes_to_send: i64;
+      {
+        let mut send = buffer_lock.lock().unwrap();
+        println!("Waiting...");
+        send = cvar.wait(send).unwrap();
+        println!("Escaped!");
+        bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
+      }
+      
       let tcp = Arc::clone(&tcp_clone);
       let mut available_bytes: i64;
       // Check to see if there are bytes in the buffer that have not been sent yet
       while bytes_to_send > 0 {
+        
         { 
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
           // TEMPORARY CHANGE: WINDOW SIZE SHOULD BE LBW 
+          let mut send = buffer_lock.lock().unwrap();
           available_bytes = self.status.0.lock().unwrap().window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
           // available_bytes = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
-          println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
+          // println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
           // println!("available bytes: {} = lbw: {} - nxt: {}", available_bytes, send.lbw, send.nxt);
         }
 
         if available_bytes <= 0 {
-          // Wait for non-zero size
-          // Send next byte you would want to send
+          let (stat_lock, stat_cvar) = &*self.status;
+          // SEND PROBE
+
+          loop {
+            let wait_time = Duration::from_micros((rto_max + rto_min) / 2 );
+            let status = stat_lock.lock().unwrap();
+            let (status, timeout_result) 
+              = stat_cvar.wait_timeout(status, wait_time).unwrap();
+          
+            if timeout_result.timed_out() {
+              // SEND PROBE
+            } else {
+              let send = buffer_lock.lock().unwrap();
+              available_bytes = status.window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
+              if available_bytes > 0 {
+                break;
+              }
+            }
+          }
           todo!("Zero-window probing");
         }
         
@@ -512,35 +545,35 @@ impl TcpStream {
         // let mut send_bytes = vec![0; end - start]; 
         // println!("{:?}", &send.buffer.buffer[start..end]);
         // send_bytes.copy_from_slice(&send.buffer.buffer[start..end]);
+        let mut send = buffer_lock.lock().unwrap();
         let nxt = send.nxt;
         let send_bytes = send.buffer.read(nxt, send_bytes_length);
-        println!("{:?}", send_bytes);
+        // println!("{:?}", send_bytes);
         let seq_num;
         let ack_num;
         let wnd;
         {
           let mut stream_info = self.status.0.lock().unwrap();
-          stream_info.update(None, Some(send.prev_lbw + 1), None, None);
           seq_num = stream_info.seq_num;
           ack_num = stream_info.ack_num;
           wnd = self.receive_buffer.0.lock().unwrap().wnd;
+          stream_info.update(None, Some(seq_num + send_bytes_length), None, None);
         }
         
-
         let packet = TcpPacket::new_ack(self.socket_key.local_port.unwrap(), 
           self.socket_key.remote_port.unwrap(),
           seq_num, ack_num, wnd, send_bytes
         );
-
+    
         {
           let safe_tcp = tcp.lock().unwrap();
           safe_tcp.send_packet(packet, self.socket_key.remote_ip.unwrap());
         }
-    
+        
         // Adjust send.nxt
         send.nxt += send_bytes_length as u32;
         // Recalculate bytes_to_send
-        bytes_to_send = (send.lbw as i64) - (send.nxt as i64);
+        bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
       }
     }
   }

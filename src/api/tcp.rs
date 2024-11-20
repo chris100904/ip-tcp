@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, fs::File, io::{BufReader, Read, Write}, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}, u32::MAX};
+use std::{collections::{HashMap, HashSet}, fs::File, io::{BufReader, Read, Write}, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}, time::Duration, u32::MAX};
 use std::thread;
 use rand::Rng;
 
@@ -30,7 +30,9 @@ pub struct Tcp {
     pub src_ip: Ipv4Addr,
     pub tcp_send_ip: Sender<(TcpPacket, Ipv4Addr)>,
     pub socket_table: Arc<Mutex<HashMap<SocketKey, Socket>>>,
-    pub used_ports: Arc<Mutex<HashSet<u16>>>
+    pub used_ports: Arc<Mutex<HashSet<u16>>>,
+    pub rto_min: u64,
+    pub rto_max: u64
 }
 
 #[derive(Clone, Debug)]
@@ -101,12 +103,14 @@ impl Socket {
 }
 
 impl Tcp {
-    pub fn new(tcp_send_ip: Sender<(TcpPacket, Ipv4Addr)>, src_ip: Ipv4Addr) -> Tcp {
+    pub fn new(tcp_send_ip: Sender<(TcpPacket, Ipv4Addr)>, src_ip: Ipv4Addr, rto_min: u64, rto_max: u64) -> Tcp {
         Tcp {
           src_ip,
           tcp_send_ip,
           socket_table: Arc::new(Mutex::new(std::collections::HashMap::new())),
-          used_ports: Arc::new(Mutex::new(HashSet::<u16>::new()))
+          used_ports: Arc::new(Mutex::new(HashSet::<u16>::new())),
+          rto_min,
+          rto_max,
         }
     }
 
@@ -300,7 +304,7 @@ impl Tcp {
     }
 
     // Receive a packet
-    pub fn receive_packet(&mut self, packet: Packet) -> Result<(), TcpError> {
+    pub fn receive_packet(tcp_clone: Arc<Mutex<Tcp>>, packet: Packet) -> Result<(), TcpError> {
       let tcp_packet = TcpPacket::parse_tcp(&packet.payload)
         .map_err(|e| TcpError::ConnectionError { message: format!("Error parsing packet. Source: {}", e) })?;
       // NOTE: src_ip and dest_ip and ports are FLIPPED because we want to check if the dest_ip is our source_ip, etc. 
@@ -315,7 +319,11 @@ impl Tcp {
       match tcp_packet.flags {
         flag if flag == TcpFlags::SYN => {
           // Check if tcp_packet.dst_port is a LISTEN port (src_port in socket table)
-          if let Some(listen_socket) = self.is_listen(tcp_packet.dst_port) {
+          let mut socket;
+          {
+            socket = tcp_clone.lock().unwrap().is_listen(tcp_packet.dst_port);
+          }
+          if let Some(listen_socket) = socket {
             Ok(if let TcpSocket::Listener(ref listen_conn) = listen_socket.tcp_socket {
               // Acquire lock to check for existing connection
               let already_exists = {
@@ -342,7 +350,11 @@ impl Tcp {
         },
         flag if flag == TcpFlags::SYN | TcpFlags::ACK => {
           // Check if connection is already in the socket table and has status SYN-SENT
-          Ok(if let Some(socket) = self.get_socket(socket_key) {
+          let mut opt_socket;
+          {
+            opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
+          }
+          Ok(if let Some(socket) = opt_socket {
             if socket.status == SocketStatus::SynSent {
               // If so, then proceed with connect (send the ACK) and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
@@ -363,7 +375,11 @@ impl Tcp {
         },
         flag if flag == TcpFlags::ACK => {
           // Check if connection is already in the socket table and has status SYN-RECEIVED
-          Ok(if let Some(socket) = self.get_socket(socket_key) {
+          let mut opt_socket;
+          {
+            opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
+          }
+          Ok(if let Some(socket) = opt_socket {
             if socket.status == SocketStatus::SynReceived {
               // If so, then finish accept() and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
@@ -384,18 +400,25 @@ impl Tcp {
               // If there is data in the payload, then the receive_buffer should be changed.
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
-                lock.lock().unwrap().update(Some(SocketStatus::Established), 
-                  Some(tcp_packet.ack_num), Some(tcp_packet.seq_num),
-                   Some(tcp_packet.window));
-
+                {
+                  let (send_lock, send_cv) = &*stream.send_buffer;
+                  let mut send_buf = send_lock.lock().unwrap();
+                  if tcp_packet.ack_num - 1 >= send_buf.una {
+                    send_buf.una = tcp_packet.ack_num - 1;
+                    lock.lock().unwrap().update(None, 
+                      None, None,
+                       Some(tcp_packet.window));
+                    }
+                    cvar.notify_all();
+                }
                 let (recv_lock, recv_cv) = &*stream.receive_buffer;
                 let mut recv_buf = recv_lock.lock().unwrap();
 
                 // TODO: SET NXT VALUE
                 // TODO: THINK OF A BETTER WAY TO GET THE VALUES OF THE ACK RESPONSE PACKET
                 if tcp_packet.payload.len() != 0 {
-                  println!("NXT: {}, SEQ RECEIVED: {}", recv_buf.nxt, tcp_packet.seq_num);
-                  println!("ACK: {}", tcp_packet.ack_num);
+                  // println!("NXT: {}, SEQ RECEIVED: {}", recv_buf.nxt, tcp_packet.seq_num);
+                  // println!("ACK: {}", tcp_packet.ack_num);
                   let _ = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
                   recv_cv.notify_all();
                   
@@ -411,7 +434,8 @@ impl Tcp {
                     status.ack_num.clone(), 
                     status.window_size.clone(), 
                     Vec::new());
-                  self.send_packet(ack_response, packet.src_ip);
+                  
+                  tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
                 }
               }
             } else if socket.status == SocketStatus::FinWait1 {

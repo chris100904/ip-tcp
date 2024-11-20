@@ -33,7 +33,7 @@ fn main() {
 
     let src_ip = ip_config.interfaces[0].assigned_ip;
     let host = Arc::new(Mutex::new(Device::new(&ip_config, packet_sender)));
-    let tcp= Arc::new(Mutex::new(Tcp::new(tcp_send_ip, src_ip)));
+    let tcp= Arc::new(Mutex::new(Tcp::new(tcp_send_ip, src_ip, ip_config.tcp_rto_min.unwrap(), ip_config.tcp_rto_max.unwrap())));
 
     // Create a channel for communication between the REPL and the Host
     let (repl_send, repl_recv) = mpsc::channel();
@@ -97,16 +97,8 @@ pub fn receive_tcp_packet(tcp_clone: Arc<Mutex<Tcp>>, tcp_recv_ip: Receiver<(Pac
   loop{
     match tcp_recv_ip.recv() {
       Ok((packet, src_ip)) => {
-        loop {
-          match tcp_clone.try_lock() {
-            Ok(mut safe_tcp) => {
-              safe_tcp.receive_packet(packet);
-              break;
-            }
-            Err(e) => {
-              eprintln!("Vhost 107");
-            }
-          }
+        if let Err(e) = Tcp::receive_packet(Arc::clone(&tcp_clone), packet) {
+          eprintln!("{e}");
         }
       },
       Err(e) => {

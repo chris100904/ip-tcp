@@ -132,13 +132,13 @@ impl Device {
                         }
                     }
                     break;
+                  } else {
+                    // If the interface is disabled, you can log or handle it accordingly
+                    eprintln!("Interface {} is disabled, packet dropped.", src_ip);
                   }
                 }
               }
-            } else {
-                // If the interface is disabled, you can log or handle it accordingly
-                eprintln!("Interface {} is disabled, packet dropped.", src_ip);
-            }
+            } 
             break;
           }
         } 
