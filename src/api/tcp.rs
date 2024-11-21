@@ -32,7 +32,9 @@ pub struct Tcp {
     pub socket_table: Arc<Mutex<HashMap<SocketKey, Socket>>>,
     pub used_ports: Arc<Mutex<HashSet<u16>>>,
     pub rto_min: u64,
-    pub rto_max: u64
+    pub rto_max: u64,
+    pub rto: u64,
+    pub srtt: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +113,8 @@ impl Tcp {
           used_ports: Arc::new(Mutex::new(HashSet::<u16>::new())),
           rto_min,
           rto_max,
+          rto: 0,
+          srtt: 0,
         }
     }
 
@@ -315,7 +319,7 @@ impl Tcp {
         remote_port: Some(tcp_packet.src_port),
       };
 
-      println!("{:?}", tcp_packet.flags);
+      // println!("{:?}", tcp_packet.flags);
       match tcp_packet.flags {
         flag if flag == TcpFlags::SYN => {
           // Check if tcp_packet.dst_port is a LISTEN port (src_port in socket table)
@@ -403,13 +407,31 @@ impl Tcp {
                 {
                   let (send_lock, send_cv) = &*stream.send_buffer;
                   let mut send_buf = send_lock.lock().unwrap();
+                  println!("Received ACK - 1: {}, UNA: {}", tcp_packet.ack_num - 1, send_buf.una);
                   if tcp_packet.ack_num - 1 >= send_buf.una {
                     send_buf.una = tcp_packet.ack_num - 1;
                     lock.lock().unwrap().update(None, 
                       None, None,
                        Some(tcp_packet.window));
-                    }
-                    cvar.notify_all();
+                  }
+
+                  // Remove acknowledged packets from retransmission queue
+                  let mut retrans_queue = stream.retransmission_queue.lock().unwrap();
+                  while let Some(entry) = retrans_queue.front() {
+                      if entry.packet.seq_num + entry.packet.payload.len() as u32 <= tcp_packet.ack_num {
+                          retrans_queue.pop_front();
+                      } else {
+                          break;
+                      }
+                  }
+
+                  // Reset RTO timer if new data is acknowledged
+                  // if !retrans_queue.is_empty() && tcp_packet.ack_num > send_buf.una {
+                  //     todo!();
+                  //     stream.start_rto_timer();
+                  // }
+                  
+                  cvar.notify_all();
                 }
                 let (recv_lock, recv_cv) = &*stream.receive_buffer;
                 let mut recv_buf = recv_lock.lock().unwrap();
@@ -419,23 +441,26 @@ impl Tcp {
                 if tcp_packet.payload.len() != 0 {
                   // println!("NXT: {}, SEQ RECEIVED: {}", recv_buf.nxt, tcp_packet.seq_num);
                   // println!("ACK: {}", tcp_packet.ack_num);
-                  let _ = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
-                  recv_cv.notify_all();
-                  
-                  let mut status = lock.lock().unwrap();
-                  status.update(None, None, Some(recv_buf.nxt), Some(recv_buf.wnd));
+                  println!("Received SEQ: {}, NXT: {}", tcp_packet.seq_num, recv_buf.nxt);
+                  if tcp_packet.seq_num >= recv_buf.nxt {
+                    let _ = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
+                    recv_cv.notify_all();
+                    
+                    let mut status = lock.lock().unwrap();
+                    status.update(None, None, Some(recv_buf.nxt), Some(recv_buf.wnd));
 
-                  let src_port = tcp_packet.dst_port;
-                  let dst_port = tcp_packet.src_port;
-                  let ack_response = TcpPacket::new_ack(
-                    src_port,
-                    dst_port, 
-                    status.seq_num.clone(), 
-                    status.ack_num.clone(), 
-                    status.window_size.clone(), 
-                    Vec::new());
-                  
-                  tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
+                    let src_port = tcp_packet.dst_port;
+                    let dst_port = tcp_packet.src_port;
+                    let ack_response = TcpPacket::new_ack(
+                      src_port,
+                      dst_port, 
+                      status.seq_num.clone(), 
+                      status.ack_num.clone(), 
+                      status.window_size.clone(), 
+                      Vec::new());
+                    println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_response.seq_num, ack_response.ack_num, ack_response.window);
+                    tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
+                  }
                 }
               }
             } else if socket.status == SocketStatus::FinWait1 {
@@ -486,6 +511,7 @@ impl Tcp {
     }
 
     pub fn send_packet(&self, packet: TcpPacket, dst_ip: Ipv4Addr) {
+      println!("Sent {:?}", String::from_utf8_lossy(&packet.payload));
       self.tcp_send_ip.send((packet, dst_ip));
     }
 

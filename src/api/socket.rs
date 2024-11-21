@@ -11,7 +11,7 @@ use super::buffer::{CircularBuffer, ReceiveBuffer, SendBuffer};
 use super::error::TcpError;
 use super::tcp::{Socket, Tcp};
 
-pub const MAX_SEGMENT_SIZE: usize = 536;
+pub const MAX_SEGMENT_SIZE: usize = 2; // 536
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 pub struct Connection {
@@ -101,6 +101,7 @@ impl TcpListener {
       })?;
     let socket_table;
     let status_cv;
+    let syn_ack_time; // store time when syn-ack is sent
     {
       let tcp = tcp_clone.lock().unwrap();
       // Create normal socket with this socket connection
@@ -119,6 +120,7 @@ impl TcpListener {
       let syn_ack_packet = TcpPacket::new_syn_ack(port, 
       dst_port, connection.seq_num, connection.ack_num + 1);
       tcp.send_packet(syn_ack_packet, dst_ip);
+      syn_ack_time = Instant::now();
 
       // update socket table
       {
@@ -150,6 +152,19 @@ impl TcpListener {
         connection.seq_num + 1,connection.ack_num + 1) {
         pending_conns = pend_cvar.wait(pending_conns).unwrap(); 
       }
+
+      // Calculate RTT using the time difference from when SYN-ACK was sent to now
+      let measured_rtt = syn_ack_time.elapsed();
+
+      {
+        let mut tcp = tcp_clone.lock().unwrap();
+        let measured_rtt_u64 = measured_rtt.as_millis() as u64;
+
+        // Assign the smoothed RTT and calculate RTO
+        tcp.srtt = measured_rtt_u64;
+        tcp.rto = tcp.srtt + (measured_rtt_u64 / 2);
+      }
+
       pending_conns.update(Some(SocketStatus::Established), Some(connection.seq_num + 1),
          Some(connection.ack_num + 1), Some(connection.window));
     }
@@ -209,10 +224,9 @@ impl TcpListener {
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 #[derive(Clone, Debug)]
 pub struct RetransmissionEntry {
-  seq_num: u32,
-  data: Vec<u8>,
-  timestamp: Instant,
-  retries: u32, 
+  pub packet: TcpPacket,
+  pub timestamp: Instant,
+  pub retries: u32, 
 }
 
 #[derive(Clone, Debug)]
@@ -232,6 +246,7 @@ pub struct TcpStream {
   // you've sent and the timings for those in order to support retransmission 
   // later on, and in the receiving case, you'll need to handle receiving packets out of order.
   pub retransmission_queue: Arc<Mutex<VecDeque<RetransmissionEntry>>>,
+  pub rto_timer: Instant,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -292,6 +307,7 @@ impl TcpStream {
       send_buffer: Arc::new((Mutex::new(SendBuffer::new()), Condvar::new())), 
       receive_buffer: Arc::new((Mutex::new(ReceiveBuffer::new()), Condvar::new())), 
       retransmission_queue: Arc::new(Mutex::new(VecDeque::new())),
+      rto_timer: Instant::now(),
     }
   }
 
@@ -302,6 +318,7 @@ impl TcpStream {
       send_buffer: self.send_buffer.clone(), 
       receive_buffer: self.receive_buffer.clone(),
       retransmission_queue: self.retransmission_queue.clone(),
+      rto_timer: self.rto_timer.clone(),
     }
   }
   pub fn connect(tcp_clone: Arc<Mutex<Tcp>>, dst_ip: Ipv4Addr, dst_port: u16) -> Result<TcpStream, TcpError> {
@@ -336,9 +353,11 @@ impl TcpStream {
     // Send SYN packet
     let packet = TcpPacket::new_syn(port, dst_port, seq_num, ack_num);
     let status_cv ;
+    let syn_ack_time; // store time when syn-ack is sent
     {
       let tcp = tcp_clone.lock().unwrap();
       tcp.send_packet(packet.clone(), dst_ip);
+      syn_ack_time = Instant::now();
       {
         let mut socket_table = tcp.socket_table.lock().unwrap();
         socket_table.insert(socket_key.clone(), socket);
@@ -383,6 +402,18 @@ impl TcpStream {
           tcp.send_packet(packet.clone(), dst_ip);
         }
       }
+    }
+
+    // Calculate RTT using the time difference from when SYN-ACK was sent to now
+    let measured_rtt = syn_ack_time.elapsed();
+
+    {
+      let mut tcp = tcp_clone.lock().unwrap();
+      let measured_rtt_u64 = measured_rtt.as_millis() as u64;
+
+      // Assign the smoothed RTT and calculate RTO
+      tcp.srtt = measured_rtt_u64;
+      tcp.rto = tcp.srtt + (measured_rtt_u64 / 2);
     }
 
     // Send ACK packet
@@ -439,10 +470,8 @@ impl TcpStream {
         available_bytes = recv_buffer.nxt.wrapping_sub(recv_buffer.lbr.wrapping_add(1));
         // println!("{} = {} - {} + 1", available_bytes, recv_buffer.nxt, recv_buffer.lbr);
         if available_bytes == 0 {
-          println!("Blocking! Line 440");
           recv_buffer = recv_cv.wait(recv_buffer).unwrap();
         } else {
-          println!("Escaped! Line 443");
           break;
         }
       } 
@@ -477,7 +506,6 @@ impl TcpStream {
   // Called on a separate thread.
   pub fn send_bytes(&mut self, tcp_clone: Arc<Mutex<Tcp>>) {
     let (buffer_lock, cvar) = &*self.send_buffer;
-    let mut last_probe_time = Instant::now();
     let rto_min;
     let rto_max;
     {
@@ -486,14 +514,11 @@ impl TcpStream {
       rto_min = safe_tcp.rto_min;
     }
 
-
     loop {
       let mut bytes_to_send: i64;
       {
         let mut send = buffer_lock.lock().unwrap();
-        println!("Waiting...");
         send = cvar.wait(send).unwrap();
-        println!("Escaped!");
         bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
       }
       
@@ -505,34 +530,75 @@ impl TcpStream {
         { 
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
           // TEMPORARY CHANGE: WINDOW SIZE SHOULD BE LBW 
-          let mut send = buffer_lock.lock().unwrap();
+          let send = buffer_lock.lock().unwrap();
           available_bytes = self.status.0.lock().unwrap().window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
           // available_bytes = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
           // println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
           // println!("available bytes: {} = lbw: {} - nxt: {}", available_bytes, send.lbw, send.nxt);
         }
 
+        // ZERO-WINDOW PROBING
         if available_bytes <= 0 {
           let (stat_lock, stat_cvar) = &*self.status;
           // SEND PROBE
-
+          let seq_num;
+          let ack_num;
+          let wnd;
+          let nxt;
+          let probe_byte;
+          {
+            let status = stat_lock.lock().unwrap();
+            seq_num = status.seq_num;
+            ack_num = status.ack_num;
+            wnd = self.receive_buffer.0.lock().unwrap().wnd;
+            let mut send = buffer_lock.lock().unwrap();
+            nxt = send.nxt;
+            probe_byte = send.buffer.read(nxt, 1);
+          }
+          let probe_packet = TcpPacket::new_ack(
+            self.socket_key.local_port.unwrap(), 
+            self.socket_key.remote_port.unwrap(),
+            seq_num, ack_num, wnd, probe_byte
+          );
+          {
+            let safe_tcp = tcp.lock().unwrap();
+            safe_tcp.send_packet(probe_packet, self.socket_key.remote_ip.unwrap());
+          }
           loop {
             let wait_time = Duration::from_micros((rto_max + rto_min) / 2 );
             let status = stat_lock.lock().unwrap();
-            let (status, timeout_result) 
+            let (mut status, timeout_result) 
               = stat_cvar.wait_timeout(status, wait_time).unwrap();
-          
             if timeout_result.timed_out() {
-              // SEND PROBE
+              let seq_num = status.seq_num;
+              let ack_num = status.ack_num;
+              let wnd = self.receive_buffer.0.lock().unwrap().wnd;
+              let mut send = buffer_lock.lock().unwrap();
+              let nxt = send.nxt;
+              let probe_byte = send.buffer.read(nxt, 1);
+              let probe_packet = TcpPacket::new_ack(
+                self.socket_key.local_port.unwrap(), 
+                self.socket_key.remote_port.unwrap(),
+                seq_num, ack_num, wnd, probe_byte
+              );
+              {
+                let safe_tcp = tcp.lock().unwrap();
+                safe_tcp.send_packet(probe_packet, self.socket_key.remote_ip.unwrap());
+                println!("Sent 1 byte probe packet");
+              }
+              
             } else {
-              let send = buffer_lock.lock().unwrap();
+              let mut send = buffer_lock.lock().unwrap();
               available_bytes = status.window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
               if available_bytes > 0 {
+                send.nxt += 1;
+                bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
+                status.update(None, Some(seq_num + 1), None, None);
                 break;
               }
             }
           }
-          todo!("Zero-window probing");
+          continue;
         }
         
         // Construct packet with an appropriate number of bytes
@@ -567,7 +633,17 @@ impl TcpStream {
     
         {
           let safe_tcp = tcp.lock().unwrap();
+          let packet_clone = packet.clone();
           safe_tcp.send_packet(packet, self.socket_key.remote_ip.unwrap());
+          println!("Sent {} bytes", send_bytes_length);
+
+          // Insert into retransmission queue
+          let mut retrans_queue = self.retransmission_queue.lock().unwrap();
+          retrans_queue.push_back(RetransmissionEntry {
+              packet: packet_clone,
+              timestamp: Instant::now(),
+              retries: 0,
+          });
         }
         
         // Adjust send.nxt
@@ -576,5 +652,10 @@ impl TcpStream {
         bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
       }
     }
+  }
+
+  pub fn start_rto_timer(&mut self) {
+    // Initialize or reset RTO timer
+    self.rto_timer = Instant::now();
   }
 }

@@ -3,6 +3,8 @@ use etherparse::{IpNumber, Ipv4HeaderSlice, PacketBuilder, TcpHeader, TcpHeaderS
 use bitflags::bitflags;
 use std::net::Ipv4Addr;
 
+use super::buffer::BUFFER_SIZE;
+
 #[derive(Debug)]
 pub struct Packet {
     // Fields representing the packet structure (e.g., headers, payload)
@@ -21,7 +23,7 @@ pub struct RipPacket {
   pub entries: Vec<Entry>
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TcpPacket {
   pub src_port: u16,
   pub dst_port: u16,
@@ -106,7 +108,7 @@ impl TcpPacket {
         seq_num,
         ack_num,
         flags,
-        window: 65535, // Default value
+        window: BUFFER_SIZE as u16, // Default value
         checksum: 0, // Can be blank for now since it gets calculated and replaced later.
         payload,
     }
