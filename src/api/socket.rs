@@ -533,7 +533,7 @@ impl TcpStream {
     let (buffer_lock, cvar, _) = &*self.send_buffer;
     let rto_min;
     let rto_max;
-    let rto;
+    let mut rto;
     {
       let safe_tcp = tcp_clone.lock().unwrap();
       rto_max = safe_tcp.rto_max;
@@ -542,32 +542,42 @@ impl TcpStream {
     }
 
     loop {
-      // // Check for retransmission first
-      // {
-      //   let retrans_queue = self.retransmission_queue.lock().unwrap();
-      //   if !retrans_queue.is_empty() {
-      //       if let Some(entry) = retrans_queue.front() {
-      //           if self.rto_timer.elapsed() >= Duration::from_micros(rto) {
-      //               let tcp = Arc::clone(&tcp_clone);
-      //               let mut safe_tcp = tcp.lock().unwrap();
+      // if we continually try to lock and unlock the retransmission queue, there may be a potential deadlock scenario in which we want to update the retransmission queue in another thread
+      // let should_wait = {
+      //       let retrans_queue = self.retransmission_queue.lock().unwrap();
+      //       if !retrans_queue.is_empty() {
+      //           if let Some(entry) = retrans_queue.front() {
+      //               let tcp = tcp_clone.lock().unwrap();
                     
-      //               // Send the retransmission
-      //               safe_tcp.send_packet(entry.packet.clone(), self.socket_key.remote_ip.unwrap());
-      //               println!("Retransmitted packet with seq_num: {}", entry.packet.seq_num);
-                    
-      //               // Apply exponential backoff to RTO
-      //               safe_tcp.rto = std::cmp::min(safe_tcp.rto_max, safe_tcp.rto * 2);
-                    
-      //               // Reset RTO timer
-      //               self.rto_timer = Instant::now();
-                    
-      //               // Continue to wait for acknowledgment
-      //               continue;
+      //               if self.rto_timer.elapsed() >= Duration::from_micros(rto) {
+      //                   // Retransmit the packet
+      //                   tcp.send_packet(entry.packet.clone(), self.socket_key.remote_ip.unwrap());
+                        
+      //                   // Double the RTO (exponential backoff)
+      //                   // i think this is wrong, should the entire tcp's rto be set again, or is it fine being done just locally?
+      //                   rto = std::cmp::min(rto * 2, rto_max);
+                        
+      //                   // Reset the timer
+      //                   self.rto_timer = Instant::now();
+                        
+      //                   true // Signal that we should wait for ACK
+      //               } else {
+      //                   false // timer has not elapsed
+      //               }
+      //           } else {
+      //               false
       //           }
+      //       } else {
+      //           false
       //       }
-      //   }
-      // }
+      //   };
 
+      //   if should_wait {
+      //       // Sleep for a short duration before checking again
+      //       // probably want to implement it differently here
+      //       std::thread::sleep(Duration::from_millis(100));
+      //       continue;
+      //   }
       let mut bytes_to_send: i64;
       {
         let mut send = buffer_lock.lock().unwrap();
@@ -578,7 +588,6 @@ impl TcpStream {
       
       let tcp = Arc::clone(&tcp_clone);
       let mut available_bytes: i64;
-      let mut window_size;
       // Check to see if there are bytes in the buffer that have not been sent yet
       while bytes_to_send > 0 {
         
@@ -586,8 +595,7 @@ impl TcpStream {
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
           // TEMPORARY CHANGE: WINDOW SIZE SHOULD BE LBW 
           let send = buffer_lock.lock().unwrap();
-          window_size = self.status.0.lock().unwrap().window_size;
-          available_bytes = window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
+          available_bytes = self.status.0.lock().unwrap().window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
           // available_bytes = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
           println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
           // println!("available bytes: {} = lbw: {} - nxt: {}", available_bytes, send.lbw, send.nxt);
