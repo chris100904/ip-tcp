@@ -135,7 +135,7 @@ impl Tcp {
                       TCPCommand::ListSockets => tcp.lock().unwrap().list_sockets(),
                       TCPCommand::TCPSend(socket_id, bytes) => Tcp::send_data(tcp_clone, socket_id, bytes),// safe_tcp.send_data(&socketId, &data),
                       TCPCommand::TCPReceive(socket_id, numbytes) => Tcp::receive_data(tcp_clone, socket_id, numbytes),// safe_tcp.receive_data(&socketId, &numbytes),
-                      TCPCommand::TCPClose(socket_id) => todo!(),// safe_tcp.close_socket(&socketId),
+                      TCPCommand::TCPClose(socket_id) => Tcp::close_socket(tcp_clone, socket_id),
                       TCPCommand::SendFile(path, addr, port) => Tcp::send_file(tcp_clone, path, addr, port),
                       TCPCommand::ReceiveFile(path, port) => Tcp::receive_file(tcp_clone, path, port),
                   };
@@ -634,6 +634,51 @@ impl Tcp {
       // Close connection when FIN is received
       // stream.close();
       Ok(())
+    }
+
+    pub fn close_socket(tcp_clone: Arc<Mutex<Self>>, socket_id: u32) -> Result<(), TcpError> {
+      // todo!();
+      // find the socket by ID
+      let socket;
+      {
+        let safe_tcp = tcp_clone.lock().unwrap();
+        (_, socket) = safe_tcp.get_socket_by_id(socket_id)
+          .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
+      }
+
+      // check if the socket is valid and established
+      if socket.status != SocketStatus::Established {
+        // whatever error here
+        return Err(TcpError::ConnectionError { 
+          message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket.status.to_string()) 
+        })
+      }
+      // check if there is still data to send before sending a FIN (block or wait until it is ok to send a FIN)
+      // this involves checking the send buffer (UNA == NXT == LBR) and the emptiness of retransmission queue 
+      
+      match socket.tcp_socket {
+        TcpSocket::Stream(mut stream) => {
+          while !stream.can_close() {
+            // block until it is ok to send a FIN
+            thread::sleep(Duration::from_millis(1000));
+          };
+          // send a FIN
+          let packet = TcpPacket::new(
+            stream.socket_key.local_port.unwrap(),
+            stream.socket_key.remote_port.unwrap(),
+            stream.
+            stream.ack_num,
+            TcpFlags::FIN,
+            Vec::new(),
+          );
+          stream.send_packet(Arc::clone(&tcp_clone), packet);
+          
+          Ok(())
+        },
+        TcpSocket::Listener(_) => {
+          return Err(TcpError::ConnectionError { message: "Socket was of type Listener rather than Stream.".to_string() });
+        }
+      }
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////////

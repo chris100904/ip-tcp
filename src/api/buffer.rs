@@ -68,6 +68,10 @@ impl SendBuffer {
         // self.buffer.update_base_seq(new_una);
     }
   }
+
+  pub fn is_empty(&self) -> bool {
+    self.lbw == self.una
+  }
 }
 
 #[derive(Clone, Debug)]

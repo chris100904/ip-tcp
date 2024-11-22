@@ -508,13 +508,42 @@ impl TcpStream {
     let (buffer_lock, cvar) = &*self.send_buffer;
     let rto_min;
     let rto_max;
+    let rto;
     {
       let safe_tcp = tcp_clone.lock().unwrap();
       rto_max = safe_tcp.rto_max;
       rto_min = safe_tcp.rto_min;
+      rto = safe_tcp.rto;
+
     }
 
     loop {
+      // // Check for retransmission first
+      // {
+      //   let retrans_queue = self.retransmission_queue.lock().unwrap();
+      //   if !retrans_queue.is_empty() {
+      //       if let Some(entry) = retrans_queue.front() {
+      //           if self.rto_timer.elapsed() >= Duration::from_micros(rto) {
+      //               let tcp = Arc::clone(&tcp_clone);
+      //               let mut safe_tcp = tcp.lock().unwrap();
+                    
+      //               // Send the retransmission
+      //               safe_tcp.send_packet(entry.packet.clone(), self.socket_key.remote_ip.unwrap());
+      //               println!("Retransmitted packet with seq_num: {}", entry.packet.seq_num);
+                    
+      //               // Apply exponential backoff to RTO
+      //               safe_tcp.rto = std::cmp::min(safe_tcp.rto_max, safe_tcp.rto * 2);
+                    
+      //               // Reset RTO timer
+      //               self.rto_timer = Instant::now();
+                    
+      //               // Continue to wait for acknowledgment
+      //               continue;
+      //           }
+      //       }
+      //   }
+      // }
+
       let mut bytes_to_send: i64;
       {
         let mut send = buffer_lock.lock().unwrap();
@@ -539,6 +568,7 @@ impl TcpStream {
 
         // ZERO-WINDOW PROBING
         if available_bytes <= 0 {
+          println!("it entered here?");
           let (stat_lock, stat_cvar) = &*self.status;
           // SEND PROBE
           let seq_num;
@@ -564,6 +594,7 @@ impl TcpStream {
             let safe_tcp = tcp.lock().unwrap();
             safe_tcp.send_packet(probe_packet, self.socket_key.remote_ip.unwrap());
           }
+          println!("is it going to go to the loop???");
           loop {
             let wait_time = Duration::from_micros((rto_max + rto_min) / 2 );
             let status = stat_lock.lock().unwrap();
@@ -588,23 +619,33 @@ impl TcpStream {
               }
               
             } else {
+              println!("how many times does this happen");
               let mut send = buffer_lock.lock().unwrap();
               available_bytes = status.window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
               if available_bytes > 0 {
+                println!("LBW - NXT + 1 = {} - {} + 1", send.lbw, send.nxt);
                 send.nxt += 1;
+                println!("LBW - NXT + 1 = {} - {} + 1", send.lbw, send.nxt);
                 bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
+                println!("BYTES TO SEND UPDATE: {}", bytes_to_send);
                 status.update(None, Some(seq_num + 1), None, None);
+                println!("broke out of loop, means that we can send");
                 break;
               }
             }
           }
-          continue;
+          // continue;
         }
         
+        println!("bytes_to_send: {}", bytes_to_send);
+        println!("MAX_SEGMENT_SIZE: {}", MAX_SEGMENT_SIZE);
+        println!("available_bytes: {}", available_bytes);
         // Construct packet with an appropriate number of bytes
         let send_bytes_length: u32 = bytes_to_send
           .min(MAX_SEGMENT_SIZE as i64)
           .min(available_bytes as i64).try_into().unwrap();
+        
+        println!("send bytes length: {}", send_bytes_length);
 
         // let start = send.buffer.seq_to_index(send.nxt);
         // let end = send.buffer.seq_to_index(send.nxt + send_bytes_length);
@@ -657,5 +698,10 @@ impl TcpStream {
   pub fn start_rto_timer(&mut self) {
     // Initialize or reset RTO timer
     self.rto_timer = Instant::now();
+  }
+
+  pub fn can_close(&self) -> bool {
+    // check if send buffer is empty and retransmission queue is empty
+    self.send_buffer.0.lock().unwrap().is_empty() && self.retransmission_queue.lock().unwrap().is_empty()
   }
 }
