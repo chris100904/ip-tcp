@@ -405,14 +405,21 @@ impl Tcp {
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
                 {
-                  let (send_lock, send_cv) = &*stream.send_buffer;
+                  let (send_lock, send_cv, send_write_cv) = &*stream.send_buffer;
                   let mut send_buf = send_lock.lock().unwrap();
-                  println!("Received ACK - 1: {}, UNA: {}", tcp_packet.ack_num - 1, send_buf.una);
-                  if tcp_packet.ack_num - 1 >= send_buf.una {
-                    send_buf.una = tcp_packet.ack_num - 1;
-                    lock.lock().unwrap().update(None, 
-                      None, None,
-                       Some(tcp_packet.window));
+                  if tcp_packet.ack_num > send_buf.una {
+                    println!("Received ack {} is higher than our send.una {}, updating window size", tcp_packet.ack_num, send_buf.una);
+                    send_buf.una = tcp_packet.ack_num;
+                    send_write_cv.notify_all();
+                    {
+                      lock.lock().unwrap().update(None, 
+                        None, None,
+                         Some(tcp_packet.window));
+                    }
+                    if tcp_packet.window > 0 {
+                      println!("cvar notify! (tcp.rs:418)");
+                      cvar.notify_all();
+                    }
                   }
 
                   // Remove acknowledged packets from retransmission queue
@@ -430,8 +437,6 @@ impl Tcp {
                   //     todo!();
                   //     stream.start_rto_timer();
                   // }
-                  
-                  cvar.notify_all();
                 }
                 let (recv_lock, recv_cv) = &*stream.receive_buffer;
                 let mut recv_buf = recv_lock.lock().unwrap();
@@ -441,22 +446,24 @@ impl Tcp {
                 if tcp_packet.payload.len() != 0 {
                   // println!("NXT: {}, SEQ RECEIVED: {}", recv_buf.nxt, tcp_packet.seq_num);
                   // println!("ACK: {}", tcp_packet.ack_num);
-                  println!("Received SEQ: {}, NXT: {}", tcp_packet.seq_num, recv_buf.nxt);
+                  println!("Received packet with data! SEQ: {}, NXT: {}", tcp_packet.seq_num, recv_buf.nxt);
                   if tcp_packet.seq_num >= recv_buf.nxt {
+                    println!("Writing {} into recv_buf at position {}", String::from_utf8_lossy(&tcp_packet.payload), tcp_packet.seq_num);
                     let _ = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
                     recv_cv.notify_all();
                     
                     let mut status = lock.lock().unwrap();
-                    status.update(None, None, Some(recv_buf.nxt), Some(recv_buf.wnd));
+                    
+                    status.update(None, None, Some(recv_buf.nxt), None);
 
                     let src_port = tcp_packet.dst_port;
                     let dst_port = tcp_packet.src_port;
                     let ack_response = TcpPacket::new_ack(
                       src_port,
                       dst_port, 
-                      status.seq_num.clone(), 
-                      status.ack_num.clone(), 
-                      status.window_size.clone(), 
+                      status.seq_num, 
+                      status.ack_num, 
+                      recv_buf.wnd, 
                       Vec::new());
                     println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_response.seq_num, ack_response.ack_num, ack_response.window);
                     tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
@@ -516,8 +523,9 @@ impl Tcp {
     }
 
     pub fn gen_rand_u32() -> u32 {
-      let mut rng = rand::thread_rng();
-      return rng.gen();
+      return 0;
+      // let mut rng = rand::thread_rng();
+      // return rng.gen();
     }
 
     // Generates random available port number using the used_ports hashset. Does NOT insert into the hashset.
@@ -622,6 +630,7 @@ impl Tcp {
           match stream.read(MAX_SEGMENT_SIZE as u32) {
             // how to exit this loop
             Ok(data) => {
+              println!("Read bytes: {}", String::from_utf8_lossy(&data));
               file.write_all(&data).map_err(|e| TcpError::FileError { 
                 message: format!("Error writing to file: {}", e) 
               })?;
@@ -637,7 +646,7 @@ impl Tcp {
     }
 
     pub fn close_socket(tcp_clone: Arc<Mutex<Self>>, socket_id: u32) -> Result<(), TcpError> {
-      // todo!();
+      todo!();
       // find the socket by ID
       let socket;
       {
@@ -660,19 +669,28 @@ impl Tcp {
         TcpSocket::Stream(mut stream) => {
           while !stream.can_close() {
             // block until it is ok to send a FIN
+            // no idea how to go about this
             thread::sleep(Duration::from_millis(1000));
           };
+          let status = stream.status.0.lock().unwrap();
           // send a FIN
           let packet = TcpPacket::new(
             stream.socket_key.local_port.unwrap(),
             stream.socket_key.remote_port.unwrap(),
-            stream.
-            stream.ack_num,
+            status.seq_num + 1,
+            status.ack_num,
             TcpFlags::FIN,
             Vec::new(),
           );
-          stream.send_packet(Arc::clone(&tcp_clone), packet);
+          {
+            let safe_tcp = tcp_clone.lock().unwrap();
+            safe_tcp.send_packet(packet, stream.socket_key.remote_ip.unwrap());
+          }
+
+          // update state to FIN-WAIT-1
           
+          // wait to receive a FIN from the other side, probably need to get notified somehow through a condvar? not sure
+          // if FIN is received, wait 2 * MSL until initiate TCB deletion
           Ok(())
         },
         TcpSocket::Listener(_) => {

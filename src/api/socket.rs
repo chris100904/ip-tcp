@@ -11,7 +11,7 @@ use super::buffer::{CircularBuffer, ReceiveBuffer, SendBuffer};
 use super::error::TcpError;
 use super::tcp::{Socket, Tcp};
 
-pub const MAX_SEGMENT_SIZE: usize = 2; // 536
+pub const MAX_SEGMENT_SIZE: usize = 4; // 536
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 pub struct Connection {
@@ -232,13 +232,16 @@ pub struct RetransmissionEntry {
 #[derive(Clone, Debug)]
 pub struct TcpStream {
   // Condvar has two uses: notify received packet during handshake, 
-  // and notify received packet during zero-window probing
+  // and notifys window size change in receiver socket allowing us to send more bytes.
   pub status: Arc<(Mutex<StreamInfo>, Condvar)>,
 
   pub socket_key: SocketKey,
     
-  // A buffer for reading data; Condvar is to notify the sending thread that buffer has been written into.
-  pub send_buffer: Arc<(Mutex<SendBuffer>, Condvar)>,  
+  // A buffer for reading data; 
+  // First condvar is to notify the sending thread that buffer has been written into.
+  // Second condvar is to notify the writing thread that there is more space in the send buffer to write more data.
+  pub send_buffer: Arc<(Mutex<SendBuffer>, Condvar, Condvar)>,  
+
   // A buffer for writing data; Condvar is for a blocking read
   pub receive_buffer: Arc<(Mutex<ReceiveBuffer>, Condvar)>,
   
@@ -304,7 +307,7 @@ impl TcpStream {
     TcpStream { 
       status: Arc::new((Mutex::new(StreamInfo::new(status, seq_num, ack_num, 0)), Condvar::new())),
       socket_key,
-      send_buffer: Arc::new((Mutex::new(SendBuffer::new()), Condvar::new())), 
+      send_buffer: Arc::new((Mutex::new(SendBuffer::new()), Condvar::new(), Condvar::new())), 
       receive_buffer: Arc::new((Mutex::new(ReceiveBuffer::new()), Condvar::new())), 
       retransmission_queue: Arc::new(Mutex::new(VecDeque::new())),
       rto_timer: Instant::now(),
@@ -489,13 +492,35 @@ impl TcpStream {
   }
 
   pub fn write(&mut self, buf: &[u8]) -> Result<usize, TcpError> {
-      let mut send_buffer = self.send_buffer.0.lock().unwrap();
-      let lbw = send_buffer.write(buf);
-
-      // Notify sending thread that new bytes have been written into the buffer
-      self.send_buffer.1.notify_all();
-      
-      Ok(0)
+    let mut data_len = buf.len();
+    let mut i = 0;
+    loop {
+      if data_len <= 0 {
+        break;
+      }
+      let mut send_buf = self.send_buffer.0.lock().unwrap();
+      // If bytes to send is bigger than the space we have available in the buffer
+      let bytes_available = send_buf.buffer.capacity - (send_buf.lbw.wrapping_add(1).wrapping_sub(send_buf.una)) as usize;
+      if bytes_available == 0 {
+        send_buf = self.send_buffer.2.wait(send_buf).unwrap();
+        continue;
+      }
+      if data_len > bytes_available {
+        let bytes_to_write = &buf[i..i+bytes_available];
+        let _ = send_buf.write(bytes_to_write);
+        data_len -= bytes_available;
+        i += bytes_available;
+        // Notify sending thread that new bytes have been written into the buffer
+        self.send_buffer.1.notify_all();
+      } else {
+        let bytes_to_write = &buf[i..i+data_len];
+        let _ = send_buf.write(bytes_to_write);
+        // Notify sending thread that new bytes have been written into the buffer
+        self.send_buffer.1.notify_all();
+        break;
+      }
+    }  
+    Ok(0)
   }   
 
   pub fn close(&self) -> Result<(), TcpError> {
@@ -505,7 +530,7 @@ impl TcpStream {
 
   // Called on a separate thread.
   pub fn send_bytes(&mut self, tcp_clone: Arc<Mutex<Tcp>>) {
-    let (buffer_lock, cvar) = &*self.send_buffer;
+    let (buffer_lock, cvar, _) = &*self.send_buffer;
     let rto_min;
     let rto_max;
     let rto;
@@ -514,7 +539,6 @@ impl TcpStream {
       rto_max = safe_tcp.rto_max;
       rto_min = safe_tcp.rto_min;
       rto = safe_tcp.rto;
-
     }
 
     loop {
@@ -549,6 +573,7 @@ impl TcpStream {
         let mut send = buffer_lock.lock().unwrap();
         send = cvar.wait(send).unwrap();
         bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
+        println!("bytes_to_send: {} = LBW: {} - (NXT: {} + 1)", bytes_to_send, send.lbw, send.nxt);
       }
       
       let tcp = Arc::clone(&tcp_clone);
@@ -562,13 +587,13 @@ impl TcpStream {
           let send = buffer_lock.lock().unwrap();
           available_bytes = self.status.0.lock().unwrap().window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
           // available_bytes = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
-          // println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
+          println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
           // println!("available bytes: {} = lbw: {} - nxt: {}", available_bytes, send.lbw, send.nxt);
         }
 
         // ZERO-WINDOW PROBING
         if available_bytes <= 0 {
-          println!("it entered here?");
+          println!("BEGIN ZERO-WINDOW PROBING");
           let (stat_lock, stat_cvar) = &*self.status;
           // SEND PROBE
           let seq_num;
@@ -592,15 +617,17 @@ impl TcpStream {
           );
           {
             let safe_tcp = tcp.lock().unwrap();
+            println!("Sending probe (socket.rs:595)");
             safe_tcp.send_packet(probe_packet, self.socket_key.remote_ip.unwrap());
           }
-          println!("is it going to go to the loop???");
           loop {
             let wait_time = Duration::from_micros((rto_max + rto_min) / 2 );
             let status = stat_lock.lock().unwrap();
+            println!("Waiting for an ack result (socket.rs:601)");
             let (mut status, timeout_result) 
               = stat_cvar.wait_timeout(status, wait_time).unwrap();
             if timeout_result.timed_out() {
+              println!("Result timed out. Sending packet again. (socket.rs:605)");
               let seq_num = status.seq_num;
               let ack_num = status.ack_num;
               let wnd = self.receive_buffer.0.lock().unwrap().wnd;
@@ -615,21 +642,17 @@ impl TcpStream {
               {
                 let safe_tcp = tcp.lock().unwrap();
                 safe_tcp.send_packet(probe_packet, self.socket_key.remote_ip.unwrap());
-                println!("Sent 1 byte probe packet");
-              }
-              
+              }              
             } else {
-              println!("how many times does this happen");
+              println!("An ack was received! Proceeding to update our values to account for the sent byte. (socket:622)");
               let mut send = buffer_lock.lock().unwrap();
-              available_bytes = status.window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
+              available_bytes = status.window_size as i64 - (send.nxt.wrapping_add(1)).wrapping_sub(send.una) as i64;
+              println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, status.window_size, send.nxt, send.una);
               if available_bytes > 0 {
-                println!("LBW - NXT + 1 = {} - {} + 1", send.lbw, send.nxt);
                 send.nxt += 1;
-                println!("LBW - NXT + 1 = {} - {} + 1", send.lbw, send.nxt);
                 bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
-                println!("BYTES TO SEND UPDATE: {}", bytes_to_send);
                 status.update(None, Some(seq_num + 1), None, None);
-                println!("broke out of loop, means that we can send");
+                println!("Updated out Seq num to be {} (socket:629)", seq_num + 1);
                 break;
               }
             }
@@ -637,8 +660,6 @@ impl TcpStream {
           // continue;
         }
         
-        println!("bytes_to_send: {}", bytes_to_send);
-        println!("MAX_SEGMENT_SIZE: {}", MAX_SEGMENT_SIZE);
         println!("available_bytes: {}", available_bytes);
         // Construct packet with an appropriate number of bytes
         let send_bytes_length: u32 = bytes_to_send

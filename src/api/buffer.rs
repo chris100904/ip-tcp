@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-pub const BUFFER_SIZE: usize = 4; // 65535
+pub const BUFFER_SIZE: usize = 7; // 65535
 
 #[derive(Clone, Debug)]
 pub struct SendBuffer {
@@ -108,11 +108,8 @@ impl ReceiveBuffer {
   // Write data into the receive buffer.
   // Returns the number of bytes written. If no space is available, returns 0.
   pub fn write(&mut self, data_seq: u32, data: &[u8]) -> usize {
-    // // lbr needs to be changed initially... 
-    // if self.lbr == 0 {
-    //     self.lbr = data_seq;
-    // }
-    let available_space = self.wnd.wrapping_sub(self.nxt.wrapping_sub(self.lbr) as u16) as usize;
+    // let available_space = self.wnd.wrapping_sub(self.nxt.wrapping_sub(self.lbr) as u16) as usize;
+    let available_space = self.wnd as usize;
     // println!("AVAILABLE SPACE: {} = WINDOW: {} - (NXT: {} - LBR: {})", available_space, self.wnd, self.nxt, self.lbr); 
     let bytes_to_write = std::cmp::min(data.len(), available_space);
 
@@ -137,6 +134,7 @@ impl ReceiveBuffer {
 
         // Update window size
         // println!("PREV WND: {}", self.wnd);
+        println!("BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", BUFFER_SIZE, self.nxt, self.lbr);
         self.wnd = (BUFFER_SIZE - (self.nxt.wrapping_sub(self.lbr.wrapping_add(1)) as usize)) as u16;
         // println!("WND: {} = BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", self.wnd, BUFFER_SIZE, self.nxt, self.lbr);
         // println!("POST WND: {}", self.wnd);
@@ -182,7 +180,7 @@ impl ReceiveBuffer {
 #[derive(Clone, Debug)]
 pub struct CircularBuffer {
     pub buffer: Vec<u8>,
-    capacity: usize,
+    pub capacity: usize,
 }
 
 impl CircularBuffer {
@@ -219,11 +217,10 @@ impl CircularBuffer {
             // }
             let index = self.seq_to_index(current_seq);
             self.buffer[index] = byte;
-
-            // println!("circ_buf: current_seq: {}, byte: {}", current_seq, byte);
             current_seq = current_seq.wrapping_add(1);
             bytes_written += 1
         }
+        println!("Wrote bytes: {}", String::from_utf8_lossy(data));
         // println!("NOT WRITTEN circ_buf: current_seq: {}", current_seq);
         // println!("{:?}", self.buffer[self.seq_to_index(current_seq) - 1 as usize]);
         bytes_written 
