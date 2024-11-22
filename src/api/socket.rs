@@ -578,6 +578,7 @@ impl TcpStream {
       
       let tcp = Arc::clone(&tcp_clone);
       let mut available_bytes: i64;
+      let mut window_size;
       // Check to see if there are bytes in the buffer that have not been sent yet
       while bytes_to_send > 0 {
         
@@ -585,7 +586,8 @@ impl TcpStream {
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
           // TEMPORARY CHANGE: WINDOW SIZE SHOULD BE LBW 
           let send = buffer_lock.lock().unwrap();
-          available_bytes = self.status.0.lock().unwrap().window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
+          window_size = self.status.0.lock().unwrap().window_size;
+          available_bytes = window_size as i64 - send.nxt.wrapping_sub(send.una) as i64;
           // available_bytes = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
           println!("available bytes: {} = win: {} - (nxt: {} - una: {})", available_bytes, self.status.0.lock().unwrap().window_size, send.nxt, send.una);
           // println!("available bytes: {} = lbw: {} - nxt: {}", available_bytes, send.lbw, send.nxt);
