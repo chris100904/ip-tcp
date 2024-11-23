@@ -23,7 +23,7 @@ pub struct RipPacket {
   pub entries: Vec<Entry>
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TcpPacket {
   pub src_port: u16,
   pub dst_port: u16,

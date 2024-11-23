@@ -2,6 +2,7 @@ use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap,  VecDeque};
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
+use std::thread;
 use std::time::{Duration, Instant};
 use chrono::Local;
 use crate::api::packet::{TcpFlags, TcpPacket};
@@ -12,6 +13,7 @@ use super::error::TcpError;
 use super::tcp::{Socket, Tcp};
 
 pub const MAX_SEGMENT_SIZE: usize = 4; // 536
+pub const RT_MAX: usize = 5;
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 pub struct Connection {
@@ -104,16 +106,17 @@ impl TcpListener {
     let syn_ack_time; // store time when syn-ack is sent
     {
       let tcp = tcp_clone.lock().unwrap();
+      let id = tcp.next_unique_id();
       // Create normal socket with this socket connection
       let socket = Socket {
-        socket_id: tcp.next_unique_id(),
+        socket_id: id,
         status: SocketStatus::SynReceived,
         tcp_socket: TcpSocket::Stream(
           TcpStream::new(
             SocketStatus::SynReceived, 
             connection.seq_num, 
             connection.ack_num + 1, 
-            connection.socket_key.clone()))
+            connection.socket_key.clone(), id))
       };
 
       // Send SYN + ACK packet
@@ -161,8 +164,15 @@ impl TcpListener {
         let measured_rtt_u64 = measured_rtt.as_millis() as u64;
 
         // Assign the smoothed RTT and calculate RTO
-        tcp.srtt = measured_rtt_u64;
-        tcp.rto = tcp.srtt + (measured_rtt_u64 / 2);
+        // TODO RTO STREAM 
+        // if let TcpSocket::Stream(stream) = &socket_table.get_mut(&connection.socket_key).unwrap().tcp_socket {
+        //   stream.srtt = measured_rtt_u64;
+        //   stream.rto = stream.srtt + (measured_rtt_u64 / 2);
+        // } else {
+        //   return Err(TcpError::ListenerError { 
+        //       message: "Socket table contained TcpListener rather than TcpStream.".to_string() 
+        //     });
+        // }
       }
 
       pending_conns.update(Some(SocketStatus::Established), Some(connection.seq_num + 1),
@@ -222,7 +232,7 @@ impl TcpListener {
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 // TcpStream FUNCTIONS
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RetransmissionEntry {
   pub packet: TcpPacket,
   pub timestamp: Instant,
@@ -248,8 +258,10 @@ pub struct TcpStream {
   // In the sending case, you might consider keeping track of what packets 
   // you've sent and the timings for those in order to support retransmission 
   // later on, and in the receiving case, you'll need to handle receiving packets out of order.
-  pub retransmission_queue: Arc<Mutex<VecDeque<RetransmissionEntry>>>,
-  pub rto_timer: Instant,
+  pub retransmission_queue: Arc<(Mutex<VecDeque<RetransmissionEntry>>, Condvar)>,
+  pub rto: u64, 
+  pub srtt: u64,
+  pub id: u32,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -303,14 +315,16 @@ impl StreamInfo {
 }
 
 impl TcpStream { 
-  pub fn new(status: SocketStatus, seq_num: u32, ack_num: u32, socket_key: SocketKey) -> TcpStream {
+  pub fn new(status: SocketStatus, seq_num: u32, ack_num: u32, socket_key: SocketKey, id: u32) -> TcpStream {
     TcpStream { 
       status: Arc::new((Mutex::new(StreamInfo::new(status, seq_num, ack_num, 0)), Condvar::new())),
       socket_key,
       send_buffer: Arc::new((Mutex::new(SendBuffer::new()), Condvar::new(), Condvar::new())), 
       receive_buffer: Arc::new((Mutex::new(ReceiveBuffer::new()), Condvar::new())), 
-      retransmission_queue: Arc::new(Mutex::new(VecDeque::new())),
-      rto_timer: Instant::now(),
+      retransmission_queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+      rto: 0,
+      id,
+      srtt: 0,
     }
   }
 
@@ -321,9 +335,12 @@ impl TcpStream {
       send_buffer: self.send_buffer.clone(), 
       receive_buffer: self.receive_buffer.clone(),
       retransmission_queue: self.retransmission_queue.clone(),
-      rto_timer: self.rto_timer.clone(),
+      srtt: self.srtt,
+      rto: self.rto,
+      id: self.id,
     }
   }
+
   pub fn connect(tcp_clone: Arc<Mutex<Tcp>>, dst_ip: Ipv4Addr, dst_port: u16) -> Result<TcpStream, TcpError> {
     // Choose random available src_port
     let port;
@@ -350,7 +367,7 @@ impl TcpStream {
     let socket = Socket {
       socket_id: socket_id,
       status: SocketStatus::SynSent,
-      tcp_socket: TcpSocket::Stream(TcpStream::new(SocketStatus::SynSent, seq_num, ack_num, socket_key.clone())),
+      tcp_socket: TcpSocket::Stream(TcpStream::new(SocketStatus::SynSent, seq_num, ack_num, socket_key.clone(), socket_id)),
     };
 
     // Send SYN packet
@@ -415,8 +432,15 @@ impl TcpStream {
       let measured_rtt_u64 = measured_rtt.as_millis() as u64;
 
       // Assign the smoothed RTT and calculate RTO
-      tcp.srtt = measured_rtt_u64;
-      tcp.rto = tcp.srtt + (measured_rtt_u64 / 2);
+      // TODO RTO STREAM
+      // if let TcpSocket::Stream(stream) = &socket_table.get_mut(&connection.socket_key).unwrap().tcp_socket {
+      //   stream.srtt = measured_rtt_u64;
+      //   stream.rto = stream.srtt + (measured_rtt_u64 / 2);
+      // } else {
+      //   return Err(TcpError::ListenerError { 
+      //       message: "Socket table contained TcpListener rather than TcpStream.".to_string() 
+      //     });
+      // }
     }
 
     // Send ACK packet
@@ -533,43 +557,42 @@ impl TcpStream {
     let (buffer_lock, cvar, _) = &*self.send_buffer;
     let rto_min;
     let rto_max;
-    let mut rto;
     {
       let safe_tcp = tcp_clone.lock().unwrap();
       rto_max = safe_tcp.rto_max;
       rto_min = safe_tcp.rto_min;
-      rto = safe_tcp.rto;
     }
 
     loop {
-      // if we continually try to lock and unlock the retransmission queue, there may be a potential deadlock scenario in which we want to update the retransmission queue in another thread
+      
       // let should_wait = {
-      //       let retrans_queue = self.retransmission_queue.lock().unwrap();
-      //       if !retrans_queue.is_empty() {
-      //           if let Some(entry) = retrans_queue.front() {
-      //               let tcp = tcp_clone.lock().unwrap();
-                    
-      //               if self.rto_timer.elapsed() >= Duration::from_micros(rto) {
-      //                   // Retransmit the packet
+      //     let retrans_queue = self.retransmission_queue.lock().unwrap();
+      //     if !retrans_queue.is_empty() {
+      //         if let Some(entry) = retrans_queue.front() {
+      //             if self.rto_timer.elapsed() >= Duration::from_micros(rto) {
+      //                 // Retransmit the packet
+      //                 {
+      //                   let tcp = tcp_clone.lock().unwrap();
       //                   tcp.send_packet(entry.packet.clone(), self.socket_key.remote_ip.unwrap());
-                        
-      //                   // Double the RTO (exponential backoff)
-      //                   // i think this is wrong, should the entire tcp's rto be set again, or is it fine being done just locally?
-      //                   rto = std::cmp::min(rto * 2, rto_max);
-                        
-      //                   // Reset the timer
-      //                   self.rto_timer = Instant::now();
-                        
-      //                   true // Signal that we should wait for ACK
-      //               } else {
-      //                   false // timer has not elapsed
-      //               }
-      //           } else {
-      //               false
-      //           }
-      //       } else {
-      //           false
-      //       }
+      //                 }
+
+      //                 // Double the RTO (exponential backoff)
+      //                 // i think this is wrong, should the entire tcp's rto be set again, or is it fine being done just locally?
+      //                 rto = std::cmp::min(rto * 2, rto_max);
+                      
+      //                 // Reset the timer
+      //                 self.rto_timer = Instant::now();
+                      
+      //                 true // Signal that we should wait for ACK
+      //             } else {
+      //                 false // timer has not elapsed
+      //             }
+      //         } else {
+      //             false
+      //         }
+      //     } else {
+      //         false
+      //     }
       //   };
 
       //   if should_wait {
@@ -590,7 +613,6 @@ impl TcpStream {
       let mut available_bytes: i64;
       // Check to see if there are bytes in the buffer that have not been sent yet
       while bytes_to_send > 0 {
-        
         { 
           // Available Bytes = Window size since last ACK - unacknowledged bytes that have been sent
           // TEMPORARY CHANGE: WINDOW SIZE SHOULD BE LBW 
@@ -667,7 +689,6 @@ impl TcpStream {
               }
             }
           }
-          // continue;
         }
         
         println!("available_bytes: {}", available_bytes);
@@ -710,7 +731,7 @@ impl TcpStream {
           println!("Sent {} bytes", send_bytes_length);
 
           // Insert into retransmission queue
-          let mut retrans_queue = self.retransmission_queue.lock().unwrap();
+          let mut retrans_queue = self.retransmission_queue.0.lock().unwrap();
           retrans_queue.push_back(RetransmissionEntry {
               packet: packet_clone,
               timestamp: Instant::now(),
@@ -726,13 +747,54 @@ impl TcpStream {
     }
   }
 
-  pub fn start_rto_timer(&mut self) {
-    // Initialize or reset RTO timer
-    self.rto_timer = Instant::now();
-  }
-
   pub fn can_close(&self) -> bool {
     // check if send buffer is empty and retransmission queue is empty
-    self.send_buffer.0.lock().unwrap().is_empty() && self.retransmission_queue.lock().unwrap().is_empty()
+    self.send_buffer.0.lock().unwrap().is_empty() && self.retransmission_queue.0.lock().unwrap().is_empty()
+  }
+
+  pub fn retransmit(&mut self, tcp_clone: Arc<Mutex<Tcp>>) {
+    // Retransmissions handler
+    // Check for retransmissions
+    let tcp = Arc::clone(&tcp_clone);
+    loop {
+      let (rtq_lock, rtq_cv) = &*self.retransmission_queue;
+      let rt_entry: RetransmissionEntry;
+      {
+        let rtq = rtq_lock.lock().unwrap();
+        match rtq.front() {
+          Some(entry) => {
+            rt_entry = entry.clone();
+          },
+          None => return // If queue is empty, return.
+        }
+      }
+
+      if rt_entry.timestamp.elapsed() >= Duration::from_micros(self.rto) {
+        for i in 0..RT_MAX {
+          // Send retransmission
+          {
+            let safe_tcp = tcp.lock().unwrap();
+            safe_tcp.send_packet(rt_entry.packet.clone(), self.socket_key.remote_ip.unwrap());
+          }
+          {
+            let rtq = rtq_lock.lock().unwrap();
+            let (rtq, rt_result) = rtq_cv.wait_timeout(rtq, Duration::from_micros(self.rto * (1 << i) as u64)).unwrap();
+            if rtq.front() != Some(&rt_entry) {
+              break;
+            }
+          }
+          if i == RT_MAX - 1 {
+            let tcp_close = Arc::clone(&tcp);
+            let id = self.id;
+            thread::spawn(move || {
+              Tcp::close_socket(tcp_close, id);
+            });
+            return;
+          }
+        }
+      } else {
+        return;
+      }
+    }
   }
 }

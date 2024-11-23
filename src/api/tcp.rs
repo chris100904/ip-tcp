@@ -6,6 +6,9 @@ use crate::api::socket::MAX_SEGMENT_SIZE;
 
 use super::{error::TcpError, packet::{Packet, TcpFlags, TcpPacket}, socket::{self, Connection, TcpListener, TcpStream}, TCPCommand};
 
+pub const MSL: usize = 5;
+
+
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub struct SocketKey {
     pub local_ip: Option<Ipv4Addr>,
@@ -33,8 +36,6 @@ pub struct Tcp {
     pub used_ports: Arc<Mutex<HashSet<u16>>>,
     pub rto_min: u64,
     pub rto_max: u64,
-    pub rto: u64,
-    pub srtt: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -113,8 +114,6 @@ impl Tcp {
           used_ports: Arc::new(Mutex::new(HashSet::<u16>::new())),
           rto_min,
           rto_max,
-          rto: 0,
-          srtt: 0,
         }
     }
 
@@ -472,17 +471,31 @@ impl Tcp {
               }
             } else if socket.status == SocketStatus::FinWait1 {
               todo!()
-            } else if socket.status == SocketStatus::Closing {
-              todo!()
-            } else if socket.status == SocketStatus::LastAck {
-              todo!()
-            } else {
-              // If not, drop the packet.
-              return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
-            }
+          //     // simply update to FinWait2
+          //     // ETHAN
+          //     if let TcpSocket::Stream(stream) = socket.tcp_socket {
+          //       let (lock, cvar) = &*stream.status;
+          //       {
+          //         lock.lock().unwrap().update(Some(SocketStatus::FinWait2), None, 
+          //           None, None);
+          //       }
+          //       // Notify waiting threads that a new connection is available
+          //       // not needed probably
+          //       cvar.notify_all(); // changed one to all
+          //     } else {
+          //       return Err(TcpError::ConnectionError { message: "Could not find expected TcpStream.".to_string() });
+          //     }
+          //   } else if socket.status == SocketStatus::Closing {
+          //     todo!()
+          //   } else if socket.status == SocketStatus::LastAck {
+          //     todo!()
+          //   } else {
+          //     // If not, drop the packet.
+          //     return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
+          //   }
             
-          })
-        },
+          // })
+          }})},
         flag if flag == TcpFlags::RST => {
           // Should terminate the connection
           todo!()
@@ -490,12 +503,55 @@ impl Tcp {
         flag if flag == TcpFlags::FIN => {
           // Check if connection is already in the socket table
           // Valid statuses: ESTABLISHED, FIN-WAIT1, FIN-WAIT2
-          todo!()
+          todo!();
+          // let mut opt_socket;
+          // {
+          //   opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
+          // }
+          // Ok(if let Some(socket) = opt_socket {
+          //   if socket.status == SocketStatus::Established{
+          //     // send back an ACK
+          //     {
+          //       if let TcpSocket::Stream(stream) = socket.tcp_socket {
+          //         let (lock, _) = &*stream.status;
+          //         // !!! DOUBLE CHECK THIS + 1 
+          //         lock.lock().unwrap().update(Some(SocketStatus::ClosedWait), Some(tcp_packet.ack_num), 
+          //         Some(tcp_packet.seq_num + 1), Some(tcp_packet.window));
+
+          //         let status = lock.lock.unwrap();
+          //         let src_port = tcp_packet.dst_port;
+          //         let dst_port = tcp_packet.src_port;
+          //         let ack_response = TcpPacket::new_ack(
+          //           src_port,
+          //           dst_port, 
+          //           status.seq_num, 
+          //           status.ack_num, 
+          //           recv_buf.wnd, 
+          //           Vec::new());
+          //         tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
+          //       } else {
+          //         return Err(TcpError::ConnectionError { message: "Socket found was not a TcpStream.".to_string() });
+          //       }
+                
+          //     }
+          //     // call tcp close
+          //     // Tcp::close_socket(tcp_clone, )
+          //   }
+          // } else if socket.status == SocketStatus::FinWait2 {
+          //     // send back an ACK first
+          //     {
+          //       if let TcpSocket::Stream(stream) = socket.tcp_socket {
+          //         let (lock, _) = &*stream.status;
+          //         // !!! DOUBLE CHECK THIS + 1
+          //         lock.lock().unwrap().update(Some(SocketStatus::))
+          //       }
+          //     }
+          // })
         },
         flag if flag == TcpFlags::FIN | TcpFlags::ACK => {
           // Check if connection is already in the socket table
           // Valid statuses: FIN-WAIT1
-          todo!()
+          todo!();
         },
         _ => {
           // Drop the packet
@@ -688,10 +744,46 @@ impl Tcp {
           }
 
           // update state to FIN-WAIT-1
+          // for ethan: what is the cvar here
+          {
+            if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                let (lock, cvar) = &*stream.status;
+                lock.lock().unwrap().update(Some(SocketStatus::FinWait1), Some(status.seq_num + 1), None, None);
+
+                // Notify waiting threads that a new connection is available
+                // is this needed or not needed? 
+                cvar.notify_all(); // changed one to all
+              } else {
+                return Err(TcpError::ConnectionError { message: "Socket found was not a TcpStream.".to_string()});
+              }
+          }
+
+          // wait to receive an ACK from the other side, which means we want to wait for an ACK of seq + 2 (they have acknowledges everything we sent before)
+          // can consider just waiting until the retransmission queue is empty, then updating the socket status to FinWait2
           
           // wait to receive a FIN from the other side, probably need to get notified somehow through a condvar? not sure
+          // we would know if we receive a FIN in receive packet, so somehow it should know to jump to this part of the code? or maybe a separate function to handle the rest
+          
+          // when we receive a FIN and send the ACK, update our socket status to TIME_WAIT
+          {
+            if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                let (lock, cvar) = &*stream.status;
+                // double check the seq num and ack num (ack num should be what it was before but + 1, presumably was updated correctly when we received the ACK)
+                lock.lock().unwrap().update(Some(SocketStatus::TimeWait), None, Some(status.ack_num + 1), None);
+
+                // Notify waiting threads that a new connection is available
+                // i don't think this is needed?
+                cvar.notify_all(); // changed one to all
+              } else {
+                return Err(TcpError::ConnectionError { message: "Socket found was not a TcpStream.".to_string()});
+              }
+          }
+
+
           // if FIN is received, wait 2 * MSL until initiate TCB deletion
+
           Ok(())
+
         },
         TcpSocket::Listener(_) => {
           return Err(TcpError::ConnectionError { message: "Socket was of type Listener rather than Stream.".to_string() });
