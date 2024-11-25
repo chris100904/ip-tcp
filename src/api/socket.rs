@@ -529,6 +529,7 @@ impl TcpStream {
       }
       let mut send_buf = self.send_buffer.0.lock().unwrap();
       // If bytes to send is bigger than the space we have available in the buffer
+      println!("CAPACITY: {} - LBW: {} - UNA: {}", send_buf.buffer.capacity, send_buf.lbw.wrapping_add(1), send_buf.una);
       let bytes_available = send_buf.buffer.capacity - (send_buf.lbw.wrapping_add(1).wrapping_sub(send_buf.una)) as usize;
       if bytes_available == 0 {
         send_buf = self.send_buffer.2.wait(send_buf).unwrap();
@@ -774,6 +775,7 @@ impl TcpStream {
             let safe_tcp = tcp.lock().unwrap();
             safe_tcp.send_packet(rt_entry.packet.clone(), self.socket_key.remote_ip.unwrap());
           }
+          
           {
             let rtq = rtq_lock.lock().unwrap();
             let (rtq, _) = rtq_cv.wait_timeout(rtq, Duration::from_micros(self.rto * (1 << i) as u64)).unwrap();
@@ -781,6 +783,8 @@ impl TcpStream {
               break;
             }
           }
+          // Update rto with exponential backoff
+          self.rto = std::cmp::min(self.rto * 2, tcp.lock().unwrap().rto_max as u64);
           if i == RT_MAX - 1 {
             self.status.0.lock().unwrap().status = SocketStatus::Closed;
             {

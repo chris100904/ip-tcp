@@ -181,6 +181,7 @@ impl Tcp {
         TcpSocket::Stream(mut stream) => {
           let data = bytes.as_bytes();
           println!("{:?}", data);
+          println!("184 STARTING SEQ: {}", stream.status.0.lock().unwrap().seq_num);
           let result = stream.write(data);
         },
         TcpSocket::Listener(_) => {
@@ -396,7 +397,7 @@ impl Tcp {
               // Notify the thread looking to update the buffers in response to these.
               // Specifically, if the ACK number / window size changed, then update the send_buffer.
               // If there is data in the payload, then the receive_buffer should be changed.
-              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+              if let TcpSocket::Stream(mut stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
                 {
                   let (send_lock, send_cv, send_write_cv) = &*stream.send_buffer;
@@ -418,7 +419,29 @@ impl Tcp {
                   {
                     // Remove acknowledged packets from retransmission queue
                     let mut rtq = stream.rtq.0.lock().unwrap();
-                    rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
+                    rtq.retain(|entry| {
+                      // Check if packet is acknowledged
+                      if entry.packet.seq_num + (entry.packet.payload.len() as u32) <= tcp_packet.ack_num {
+                          // Calculate RTT only for packets that weren't retransmitted
+                          if entry.retries == 0 {
+                              let measured_rtt = entry.timestamp.elapsed().as_millis() as u64;
+                              
+                              stream.srtt = measured_rtt;
+                              let rto_max;
+                              let rto_min;
+                              {
+                                rto_max = tcp_clone.lock().unwrap().rto_max;
+                                rto_min = tcp_clone.lock().unwrap().rto_min;
+                              }
+                              // println!("RTO MAX: {}, RTO MIN: {}", rto_max, rto_min);
+                              stream.rto = std::cmp::min(rto_max, std::cmp::max(rto_min, (1.5 * stream.srtt as f64) as u64));
+                              // println!("Measured RTT: {}, SRTT: {}, RTO: {}", measured_rtt, stream.srtt, stream.rto);
+                          }
+                          false  // Remove this entry
+                      } else {
+                          true   // Keep this entry
+                      }
+                    });
                   }
                 }
                 let (recv_lock, recv_cv) = &*stream.receive_buffer;
@@ -464,6 +487,7 @@ impl Tcp {
                     // !!! There shouldn't be a need for updating seq num and ack num here? Just the status 
                     status.update(Some(SocketStatus::FinWait2), None, None, None);
                     *socket.status.lock().unwrap() = SocketStatus::FinWait2;
+                    println!("490: update to FINWAIT2");
                   } else {
                     return Err(TcpError::ConnectionError { message: ("Received ACK for FINWAIT1, seq num was wrong").to_string() })
                   }
@@ -471,7 +495,7 @@ impl Tcp {
                 {
                   // Remove acknowledged packets from retransmission queue
                   let mut rtq = stream.rtq.0.lock().unwrap();
-                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
+                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) > tcp_packet.ack_num);
                 }
               }
             } else if socket_status == SocketStatus::Closing {
@@ -489,10 +513,11 @@ impl Tcp {
                 {
                   // Remove acknowledged packets from retransmission queue
                   let mut rtq = stream.rtq.0.lock().unwrap();
-                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
+                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) > tcp_packet.ack_num);
                 }
               }
             } else if socket_status == SocketStatus::LastAck {
+              println!("519");
               // If you receive an ACK that is 1 greater than current SEQ, then can transition to CLOSED and initiate teardown
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 {
@@ -506,7 +531,7 @@ impl Tcp {
                 {
                   // Remove acknowledged packets from retransmission queue
                   let mut rtq = stream.rtq.0.lock().unwrap();
-                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
+                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) > tcp_packet.ack_num);
                 }
 
                 // initiate TCB teardown
@@ -558,6 +583,7 @@ impl Tcp {
                     Vec::new()
                   );
                 }
+                println!("584: update to CLOSED WAIT");
                 println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_response.seq_num, ack_response.ack_num, ack_response.window);
                 tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
 
@@ -590,12 +616,13 @@ impl Tcp {
             }
             // If we are FIN-WAIT2, we want to send an ACK acknowledging the FIN and transition to TIME_WAIT 
             else if socket_status == SocketStatus::FinWait2 {
+              println!("618 FINWAIT2");
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 {
                   let mut status = stream.status.0.lock().unwrap();
                   status.update(Some(SocketStatus::TimeWait), None, Some(tcp_packet.seq_num + 1), None);
                   *socket.status.lock().unwrap() = SocketStatus::TimeWait;
-
+                  println!("625: update to TIMEWAIT, sending ACK");
                   // send an ACK
                   let ack_repsonse = TcpPacket::new_ack(
                     tcp_packet.dst_port,
@@ -791,7 +818,8 @@ impl Tcp {
       }
 
       // Close the connection
-      // stream.close();
+      let _ = Tcp::close_socket(tcp.clone(), stream.id, true);
+      tcp.lock().unwrap().remove_socket(&stream.socket_key);
       Ok(())
     }
 
@@ -831,9 +859,6 @@ impl Tcp {
           }
         }
       }
-      
-      // Close connection when FIN is received
-      // stream.close();
       Ok(())
     }
 
@@ -850,7 +875,6 @@ impl Tcp {
         (_, socket) = safe_tcp.get_socket_by_id(socket_id)
           .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
       }
-
       // check if the socket is valid and established
       let socket_status;
       {
@@ -894,10 +918,12 @@ impl Tcp {
             if is_active {
               status.update(Some(SocketStatus::FinWait1), None, None, None);
               *socket.status.lock().unwrap() = SocketStatus::FinWait1;
+              println!("920: update to FINWAIT1, sending FIN");
             } else {
               // passive goes from close_wait to last_ack
               status.update(Some(SocketStatus::LastAck), None, None, None);
               *socket.status.lock().unwrap() = SocketStatus::LastAck;
+              println!("922: update to LASTACK, sending FIN");
             }
             // create FIN packet
             fin_packet = TcpPacket::new(
