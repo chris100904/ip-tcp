@@ -139,8 +139,8 @@ impl Tcp {
                       TCPCommand::ListenAccept(port) => Tcp::listen_and_accept(tcp_clone, port),
                       TCPCommand::TCPConnect(vip, port) => Tcp::connect(&tcp, vip, port),
                       TCPCommand::ListSockets => tcp.lock().unwrap().list_sockets(),
-                      TCPCommand::TCPSend(socket_id, bytes) => Tcp::send_data(tcp_clone, socket_id, bytes),// safe_tcp.send_data(&socketId, &data),
-                      TCPCommand::TCPReceive(socket_id, numbytes) => Tcp::receive_data(tcp_clone, socket_id, numbytes),// safe_tcp.receive_data(&socketId, &numbytes),
+                      TCPCommand::TCPSend(socket_id, bytes) => Tcp::send_data(tcp_clone, socket_id, bytes),
+                      TCPCommand::TCPReceive(socket_id, numbytes) => Tcp::receive_data(tcp_clone, socket_id, numbytes),
                       TCPCommand::TCPClose(socket_id) => Tcp::close_socket(tcp_clone, socket_id, true),
                       TCPCommand::SendFile(path, addr, port) => Tcp::send_file(tcp_clone, path, addr, port),
                       TCPCommand::ReceiveFile(path, port) => Tcp::receive_file(tcp_clone, path, port),
@@ -464,7 +464,6 @@ impl Tcp {
                     // !!! There shouldn't be a need for updating seq num and ack num here? Just the status 
                     status.update(Some(SocketStatus::FinWait2), None, None, None);
                     *socket.status.lock().unwrap() = SocketStatus::FinWait2;
-                    println!("467");
                   } else {
                     return Err(TcpError::ConnectionError { message: ("Received ACK for FINWAIT1, seq num was wrong").to_string() })
                   }
@@ -631,7 +630,8 @@ impl Tcp {
                 tcp_clone.lock().unwrap().remove_socket(&socket_key);
               }
             } else {
-                return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
+              println!("{}", socket_status.to_string());
+                return Err(TcpError::ConnectionError { message: "Wrong socket status".to_string() });
             }
           })
         },
@@ -856,7 +856,7 @@ impl Tcp {
       {
         socket_status = socket.status.lock().unwrap().clone();
       }
-      if socket_status != SocketStatus::Established {
+      if is_active && socket_status != SocketStatus::Established {
         // whatever error here
         return Err(TcpError::ConnectionError { 
           message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket_status.to_string()) 

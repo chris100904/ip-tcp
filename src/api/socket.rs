@@ -743,6 +743,11 @@ impl TcpStream {
     loop {
       let (rtq_lock, rtq_cv) = &*self.rtq;
       let rt_entry;
+      let status = self.status.0.lock().unwrap().status.clone();
+      if status == SocketStatus::TimeWait 
+        || status == SocketStatus::LastAck {
+          return;
+      }
       {
         let mut rtq = rtq_lock.lock().unwrap();
         while rtq.is_empty() {
