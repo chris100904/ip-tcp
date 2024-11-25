@@ -892,11 +892,11 @@ impl Tcp {
             let seq = status.seq_num;
             // set the socket status to FIN_WAIT_1, don't want to upgrade seq or ack for no reason here
             if is_active {
-              status.update(Some(SocketStatus::FinWait1), Some(seq + 1), None, None);
+              status.update(Some(SocketStatus::FinWait1), None, None, None);
               *socket.status.lock().unwrap() = SocketStatus::FinWait1;
             } else {
               // passive goes from close_wait to last_ack
-              status.update(Some(SocketStatus::LastAck), Some(seq + 1), None, None);
+              status.update(Some(SocketStatus::LastAck), None, None, None);
               *socket.status.lock().unwrap() = SocketStatus::LastAck;
             }
             // create FIN packet
