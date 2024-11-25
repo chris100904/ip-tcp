@@ -1,15 +1,14 @@
-use std::{collections::{HashMap, HashSet}, fs::File, io::{BufReader, Read, Write}, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}, time::Duration, u32::MAX};
+use std::{collections::{HashMap, HashSet}, fs::File, io::{BufReader, Read, Write}, net::Ipv4Addr, sync::{mpsc::{Receiver, Sender}, Arc, Condvar, Mutex}, time::{Instant, Duration}, u32::MAX};
 use std::thread;
 use rand::Rng;
 
 use crate::api::socket::MAX_SEGMENT_SIZE;
 
-use super::{error::TcpError, packet::{Packet, TcpFlags, TcpPacket}, socket::{self, Connection, TcpListener, TcpStream}, TCPCommand};
+use super::{error::TcpError, packet::{Packet, TcpFlags, TcpPacket}, socket::{self, Connection, TcpListener, TcpStream, RTEntry}, TCPCommand};
 
 pub const MSL: usize = 5;
 
-
-#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Debug, Copy)]
 pub struct SocketKey {
     pub local_ip: Option<Ipv4Addr>,
     pub local_port: Option<u16>,
@@ -91,7 +90,7 @@ impl SocketStatus {
 #[derive(Clone, Debug)]
 pub struct Socket {
     pub socket_id: u32,
-    pub status: SocketStatus,
+    pub status: Arc<Mutex<SocketStatus>>,
     pub tcp_socket: TcpSocket, 
 }
 
@@ -99,9 +98,17 @@ impl Socket {
     pub fn new(socket_id: u32, status: SocketStatus, tcp_socket: TcpSocket) -> Socket {
         Socket {
             socket_id,
-            status, 
+            status: Arc::new(Mutex::new(status)), 
             tcp_socket
         }
+    }
+    
+    pub fn clone(&self) -> Socket {
+      Socket {
+        socket_id: self.socket_id,
+        status: Arc::clone(&self.status),
+        tcp_socket: self.tcp_socket.clone(),
+    }
     }
 }
 
@@ -134,7 +141,7 @@ impl Tcp {
                       TCPCommand::ListSockets => tcp.lock().unwrap().list_sockets(),
                       TCPCommand::TCPSend(socket_id, bytes) => Tcp::send_data(tcp_clone, socket_id, bytes),// safe_tcp.send_data(&socketId, &data),
                       TCPCommand::TCPReceive(socket_id, numbytes) => Tcp::receive_data(tcp_clone, socket_id, numbytes),// safe_tcp.receive_data(&socketId, &numbytes),
-                      TCPCommand::TCPClose(socket_id) => Tcp::close_socket(tcp_clone, socket_id),
+                      TCPCommand::TCPClose(socket_id) => Tcp::close_socket(tcp_clone, socket_id, true),
                       TCPCommand::SendFile(path, addr, port) => Tcp::send_file(tcp_clone, path, addr, port),
                       TCPCommand::ReceiveFile(path, port) => Tcp::receive_file(tcp_clone, path, port),
                   };
@@ -156,13 +163,17 @@ impl Tcp {
           .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
       }
 
-      // check if the socket is valid and established
-      if socket.status != SocketStatus::Established {
-        // whatever error here
-        return Err(TcpError::ConnectionError { 
-          message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket.status.to_string()) 
-        })
+      {
+        let socket_status = socket.status.lock().unwrap();
+        // check if the socket is valid and established
+        if *socket_status != SocketStatus::Established {
+          // whatever error here
+          return Err(TcpError::ConnectionError { 
+            message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket_status.to_string()) 
+          })
+        }
       }
+      
       // get the TcpStream from the socket
       
       // translate into bytes and write into the send buffer
@@ -189,12 +200,15 @@ impl Tcp {
           .ok_or(TcpError::ConnectionError { message: format!("Socket ID {} not recognized.", socket_id) })?;
       }
 
-      // check if the socket is valid and established
-      if socket.status != SocketStatus::Established {
-        // whatever error here
-        return Err(TcpError::ConnectionError { 
-          message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket.status.to_string()) 
-        })
+      {
+        let socket_status = socket.status.lock().unwrap();
+        // check if the socket is valid and established
+        if *socket_status != SocketStatus::Established {
+          // whatever error here
+          return Err(TcpError::ConnectionError { 
+            message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket_status.to_string()) 
+          })
+        }
       }
       // get the TcpStream from the socket
       
@@ -218,36 +232,24 @@ impl Tcp {
       // return Ok(());
     }
 
-    pub fn listen_and_accept(tcp: Arc<Mutex<Self>>, port: u16) -> Result<(), TcpError> { // -> ListenerHandle {
+    pub fn listen_and_accept(tcp: Arc<Mutex<Self>>, port: u16) -> Result<(), TcpError> { 
         let tcp_listener = TcpListener::listen(Arc::clone(&tcp), port)?;
-        
-        let stop_signal = Arc::new((Mutex::new(false), Condvar::new()));
-        let stop_signal_clone = Arc::clone(&stop_signal);
 
-        let mut tcp_clone = Arc::clone(&tcp);
-        let thread_handle = thread::spawn(move || {
+        let tcp_clone = Arc::clone(&tcp);
+        thread::spawn(move || {
             loop {
               let tcp = Arc::clone(&tcp_clone);
-              let should_stop = {
-                    let (lock, cvar) = &*stop_signal_clone;
-                    let mut stop = lock.lock().unwrap();
-                    // while !*stop {
-                    //     stop = cvar.wait(stop).unwrap();
-                    // }
-                    *stop
-                };
-
-                if should_stop {
-                    // Remove entry from table?
-                    // Stop protocol?
-                    break;
-                }
                 let tcp_clone_2 = Arc::clone(&tcp);
+                let tcp_clone_3 = Arc::clone(&tcp);
                 match tcp_listener.accept(tcp) {
                   Ok(socket) => {
                     if let TcpSocket::Stream(mut stream) = socket.tcp_socket {
+                      let mut stream_clone = stream.clone();
                       thread::spawn( move || {
                         stream.send_bytes(tcp_clone_2);
+                      });
+                      thread::spawn( move || {
+                        stream_clone.retransmit(tcp_clone_3);
                       });
                     }
                   },
@@ -255,23 +257,8 @@ impl Tcp {
                     eprintln!("{e}");
                   }
                 }
-              
-                // match tcp_listener.accept(self) { 
-                //     Ok(new_socket) => {
-                //         // insert adding new socket implementation
-                //     }, 
-                //     Err(e) => {
-                //         eprintln!("Error accepting connection: {:?}", e);
-                //     }
-                // }
             }
         });
-
-        // ListenerHandle {
-        //     port,
-        //     stop_signal,
-        //     thread_handle: Some(thread_handle),
-        // }
       Ok(())
     }
 
@@ -303,7 +290,7 @@ impl Tcp {
         };
         
         // Remove the listening socket from the socket table
-        self.remove_socket(socket_key);
+        self.remove_socket(&socket_key);
     }
 
     // Receive a packet
@@ -358,7 +345,11 @@ impl Tcp {
             opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
           }
           Ok(if let Some(socket) = opt_socket {
-            if socket.status == SocketStatus::SynSent {
+            let socket_status;
+            {
+              socket_status = socket.status.lock().unwrap().clone();
+            }
+            if socket_status == SocketStatus::SynSent {
               // If so, then proceed with connect (send the ACK) and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
@@ -382,8 +373,12 @@ impl Tcp {
           {
             opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
           }
-          Ok(if let Some(socket) = opt_socket {
-            if socket.status == SocketStatus::SynReceived {
+          Ok(if let Some(mut socket) = opt_socket {
+            let socket_status;
+            {
+              socket_status = socket.status.lock().unwrap().clone();
+            }
+            if socket_status == SocketStatus::SynReceived {
               // If so, then finish accept() and establish the connection
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
@@ -396,7 +391,7 @@ impl Tcp {
               } else {
                 return Err(TcpError::ConnectionError { message: "Could not find expected TcpStream.".to_string() });
               }
-            } else if socket.status == SocketStatus::Established {
+            } else if socket_status == SocketStatus::Established {
               // Update socket's ack num, seq num, and window size
               // Notify the thread looking to update the buffers in response to these.
               // Specifically, if the ACK number / window size changed, then update the send_buffer.
@@ -420,22 +415,11 @@ impl Tcp {
                       cvar.notify_all();
                     }
                   }
-
-                  // Remove acknowledged packets from retransmission queue
-                  let mut retrans_queue = stream.retransmission_queue.lock().unwrap();
-                  while let Some(entry) = retrans_queue.front() {
-                      if entry.packet.seq_num + entry.packet.payload.len() as u32 <= tcp_packet.ack_num {
-                          retrans_queue.pop_front();
-                      } else {
-                          break;
-                      }
+                  {
+                    // Remove acknowledged packets from retransmission queue
+                    let mut rtq = stream.rtq.0.lock().unwrap();
+                    rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
                   }
-
-                  // Reset RTO timer if new data is acknowledged
-                  // if !retrans_queue.is_empty() && tcp_packet.ack_num > send_buf.una {
-                  //     todo!();
-                  //     stream.start_rto_timer();
-                  // }
                 }
                 let (recv_lock, recv_cv) = &*stream.receive_buffer;
                 let mut recv_buf = recv_lock.lock().unwrap();
@@ -469,33 +453,75 @@ impl Tcp {
                   }
                 }
               }
-            } else if socket.status == SocketStatus::FinWait1 {
-              todo!()
-          //     // simply update to FinWait2
-          //     // ETHAN
-          //     if let TcpSocket::Stream(stream) = socket.tcp_socket {
-          //       let (lock, cvar) = &*stream.status;
-          //       {
-          //         lock.lock().unwrap().update(Some(SocketStatus::FinWait2), None, 
-          //           None, None);
-          //       }
-          //       // Notify waiting threads that a new connection is available
-          //       // not needed probably
-          //       cvar.notify_all(); // changed one to all
-          //     } else {
-          //       return Err(TcpError::ConnectionError { message: "Could not find expected TcpStream.".to_string() });
-          //     }
-          //   } else if socket.status == SocketStatus::Closing {
-          //     todo!()
-          //   } else if socket.status == SocketStatus::LastAck {
-          //     todo!()
-          //   } else {
-          //     // If not, drop the packet.
-          //     return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
-          //   }
+            } else if socket_status == SocketStatus::FinWait1 {
+              // Making sure that the ACK number received is greater than our current SEQ number by 1
+              // If so, then transition to FIN-WAIT2
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                {
+                  let mut status = stream.status.0.lock().unwrap();
+                  if status.seq_num + 1 == tcp_packet.ack_num {
+                    // transition to FIN-WAIT2
+                    // !!! There shouldn't be a need for updating seq num and ack num here? Just the status 
+                    status.update(Some(SocketStatus::FinWait2), None, None, None);
+                    *socket.status.lock().unwrap() = SocketStatus::FinWait2;
+                    println!("467");
+                  } else {
+                    return Err(TcpError::ConnectionError { message: ("Received ACK for FINWAIT1, seq num was wrong").to_string() })
+                  }
+                }
+                {
+                  // Remove acknowledged packets from retransmission queue
+                  let mut rtq = stream.rtq.0.lock().unwrap();
+                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
+                }
+              }
+            } else if socket_status == SocketStatus::Closing {
+              // transition to TIME WAIT
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                let (lock, cvar) = &*stream.status;
+                {
+                  // !!! i'm worried these are wrong
+                  let mut status = lock.lock().unwrap();
+                  if status.seq_num + 1 == tcp_packet.ack_num {
+                    status.update(Some(SocketStatus::TimeWait), Some(tcp_packet.ack_num), Some(tcp_packet.seq_num + 1), None);
+                    *socket.status.lock().unwrap() = SocketStatus::TimeWait;
+                  }
+                }
+                {
+                  // Remove acknowledged packets from retransmission queue
+                  let mut rtq = stream.rtq.0.lock().unwrap();
+                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
+                }
+              }
+            } else if socket_status == SocketStatus::LastAck {
+              // If you receive an ACK that is 1 greater than current SEQ, then can transition to CLOSED and initiate teardown
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                {
+                  let mut status = stream.status.0.lock().unwrap();
+                  if status.seq_num + 1 == tcp_packet.ack_num {
+                    status.update(Some(SocketStatus::Closed), None, None, None);
+                    *socket.status.lock().unwrap() = SocketStatus::Closed;
+                  }
+                }
+
+                {
+                  // Remove acknowledged packets from retransmission queue
+                  let mut rtq = stream.rtq.0.lock().unwrap();
+                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) < tcp_packet.ack_num);
+                }
+
+                // initiate TCB teardown
+                stream.teardown_connection();
+                
+                tcp_clone.lock().unwrap().remove_socket(&socket_key);
+              }
+            } else {
+              // If not, drop the packet.
+              return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
+            }
             
-          // })
-          }})},
+          })
+        },
         flag if flag == TcpFlags::RST => {
           // Should terminate the connection
           todo!()
@@ -503,74 +529,171 @@ impl Tcp {
         flag if flag == TcpFlags::FIN => {
           // Check if connection is already in the socket table
           // Valid statuses: ESTABLISHED, FIN-WAIT1, FIN-WAIT2
-          todo!();
-          // let mut opt_socket;
-          // {
-          //   opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
-          // }
-          // Ok(if let Some(socket) = opt_socket {
-          //   if socket.status == SocketStatus::Established{
-          //     // send back an ACK
-          //     {
-          //       if let TcpSocket::Stream(stream) = socket.tcp_socket {
-          //         let (lock, _) = &*stream.status;
-          //         // !!! DOUBLE CHECK THIS + 1 
-          //         lock.lock().unwrap().update(Some(SocketStatus::ClosedWait), Some(tcp_packet.ack_num), 
-          //         Some(tcp_packet.seq_num + 1), Some(tcp_packet.window));
+          let opt_socket;
+          {
+            opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
+          }
+          Ok(if let Some(mut socket) = opt_socket {
+            // If we are ESTABLISHED, we want to send an ACK acknowledging the FIN
+            // and transition to CLOSE_WAIT. We also want to initiate our closing process, so call close_socket 
+            let socket_status;
+            {
+              socket_status = socket.status.lock().unwrap().clone();
+            }
+            if socket_status == SocketStatus::Established {
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                let ack_response;
+                {
+                  let mut status = stream.status.0.lock().unwrap();
+                  // update everything except for our own window size 
+                  status.update(Some(SocketStatus::ClosedWait), None, 
+                    Some(tcp_packet.seq_num + 1), None);
+                    *socket.status.lock().unwrap() = SocketStatus::ClosedWait;
+                  // send an ACK
+                  ack_response = TcpPacket::new_ack(
+                    tcp_packet.dst_port,
+                    tcp_packet.src_port,
+                    status.seq_num,
+                    status.ack_num,
+                    stream.receive_buffer.0.lock().unwrap().wnd,
+                    Vec::new()
+                  );
+                }
+                println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_response.seq_num, ack_response.ack_num, ack_response.window);
+                tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
 
-          //         let status = lock.lock.unwrap();
-          //         let src_port = tcp_packet.dst_port;
-          //         let dst_port = tcp_packet.src_port;
-          //         let ack_response = TcpPacket::new_ack(
-          //           src_port,
-          //           dst_port, 
-          //           status.seq_num, 
-          //           status.ack_num, 
-          //           recv_buf.wnd, 
-          //           Vec::new());
-          //         tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
-          //       } else {
-          //         return Err(TcpError::ConnectionError { message: "Socket found was not a TcpStream.".to_string() });
-          //       }
+                // initiate closing
+                Tcp::close_socket(tcp_clone, socket.socket_id, false)?;
+              }
+            }
+            // If we are FIN-WAIT1, we want to send an ACK acknowledging the FIN and transition to CLOSING
+            else if socket_status == SocketStatus::FinWait1 {
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                let ack_response;
+                {
+                  let mut status = stream.status.0.lock().unwrap();
+                  // update everything except for our own window size 
+                  status.update(Some(SocketStatus::Closing), Some(tcp_packet.ack_num), 
+                    Some(tcp_packet.seq_num + 1), None);
+                    *socket.status.lock().unwrap() = SocketStatus::Closing;
+                  // send an ACK
+                  ack_response = TcpPacket::new_ack(
+                    tcp_packet.dst_port,
+                    tcp_packet.src_port,
+                    status.seq_num,
+                    status.ack_num,
+                    stream.receive_buffer.0.lock().unwrap().wnd,
+                    Vec::new());
+                    println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_response.seq_num, ack_response.ack_num, ack_response.window);
+                    tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
+                }
+              }
+            }
+            // If we are FIN-WAIT2, we want to send an ACK acknowledging the FIN and transition to TIME_WAIT 
+            else if socket_status == SocketStatus::FinWait2 {
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                {
+                  let mut status = stream.status.0.lock().unwrap();
+                  status.update(Some(SocketStatus::TimeWait), None, Some(tcp_packet.seq_num + 1), None);
+                  *socket.status.lock().unwrap() = SocketStatus::TimeWait;
+
+                  // send an ACK
+                  let ack_repsonse = TcpPacket::new_ack(
+                    tcp_packet.dst_port,
+                    tcp_packet.src_port,
+                    status.seq_num,
+                    status.ack_num,
+                    stream.receive_buffer.0.lock().unwrap().wnd,
+                    Vec::new()
+                  );
+                  println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_repsonse.seq_num, ack_repsonse.ack_num, ack_repsonse.window);
+                  tcp_clone.lock().unwrap().send_packet(ack_repsonse, packet.src_ip);
+                }
+
+                // Start TIME_WAIT timer
+                let socket_id = socket.socket_id;
+                let tcp_for_timer = Arc::clone(&tcp_clone);
                 
-          //     }
-          //     // call tcp close
-          //     // Tcp::close_socket(tcp_clone, )
-          //   }
-          // } else if socket.status == SocketStatus::FinWait2 {
-          //     // send back an ACK first
-          //     {
-          //       if let TcpSocket::Stream(stream) = socket.tcp_socket {
-          //         let (lock, _) = &*stream.status;
-          //         // !!! DOUBLE CHECK THIS + 1
-          //         lock.lock().unwrap().update(Some(SocketStatus::))
-          //       }
-          //     }
-          // })
+                thread::spawn(move || {
+                    // Wait for 2*MSL
+                    thread::sleep(Duration::from_secs((2 * MSL).try_into().unwrap()));
+                    
+                    // After 2*MSL, initiate connection teardown
+                    let tcp = tcp_for_timer.lock().unwrap();
+                    if let Some((_, socket)) = tcp.get_socket_by_id(socket_id) {
+                      if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                        stream.teardown_connection();
+                      }
+                    }
+                    // Thread exits automatically
+                });
+                // clean up anything here in TCP
+                tcp_clone.lock().unwrap().remove_socket(&socket_key);
+              }
+            } else {
+                return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
+            }
+          })
         },
         flag if flag == TcpFlags::FIN | TcpFlags::ACK => {
           // Check if connection is already in the socket table
           // Valid statuses: FIN-WAIT1
-          todo!();
+          // Update status to TIME WAIT and send an ACK
+          let opt_socket;
+          {
+            opt_socket = tcp_clone.lock().unwrap().get_socket(socket_key);
+          }
+          Ok(if let Some(mut socket) = opt_socket {
+            let socket_status;
+            {
+              socket_status = socket.status.lock().unwrap().clone();
+            }
+            if socket_status == SocketStatus::FinWait1 {
+              if let TcpSocket::Stream(stream) = socket.tcp_socket {
+                let (lock, cvar) = &*stream.status;
+                {
+                  // update everything except for our own window size 
+                  lock.lock().unwrap().update(Some(SocketStatus::TimeWait), Some(tcp_packet.ack_num), 
+                    Some(tcp_packet.seq_num + 1), None);
+                  *socket.status.lock().unwrap() = SocketStatus::TimeWait;
+                }
+                let status = lock.lock().unwrap();
+                let (recv_lock, recv_cv) = &*stream.receive_buffer;
+                let recv_buf = recv_lock.lock().unwrap();
+                
+                // send an ACK
+                let ack_repsonse = TcpPacket::new_ack(
+                tcp_packet.dst_port,
+                tcp_packet.src_port,
+                status.seq_num,
+                status.ack_num,
+                recv_buf.wnd,
+                Vec::new());
+                println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_repsonse.seq_num, ack_repsonse.ack_num, ack_repsonse.window);
+                tcp_clone.lock().unwrap().send_packet(ack_repsonse, packet.src_ip);
+
+                // initiate timeout
+
+                // if timeout is good, update to closed
+                {
+                  lock.lock().unwrap().update(Some(SocketStatus::Closed), None, None, None);
+                  *socket.status.lock().unwrap() = SocketStatus::Closed;
+                }
+
+                // initiate TCB teardown
+                stream.teardown_connection();
+
+                // clean up anything in tcp here
+                tcp_clone.lock().unwrap().remove_socket(&socket_key);
+              }
+            }
+          })
         },
         _ => {
           // Drop the packet
           return Err(TcpError::ConnectionError { message: "Packet did not contain valid flags. Dropping.".to_string() });
         }
       }
-    }
-
-    pub fn is_listen(&self, port: u16) -> Option<Socket> {
-      if let Ok(socket_table) = self.socket_table.lock() {
-        for (socket_key, socket) in socket_table.iter() {
-          if let Some(listen_port) = socket_key.local_port {
-            if listen_port == port && socket.status == SocketStatus::Listening {
-              return Some(socket.clone());
-            }
-          }
-        }
-      }
-      return None;
     }
 
     pub fn send_packet(&self, packet: TcpPacket, dst_ip: Ipv4Addr) {
@@ -601,8 +724,13 @@ impl Tcp {
       // Create new normal socket
       let mut stream = TcpStream::connect(Arc::clone(tcp), vip, port)?;
       let tcp_clone = Arc::clone(tcp);
+      let tcp_clone_2 = Arc::clone(tcp);
+      let mut stream_clone = stream.clone();
       thread::spawn( move || {
-        stream.send_bytes(Arc::clone(&tcp_clone));
+        stream.send_bytes(tcp_clone);
+      });
+      thread::spawn( move || {
+        stream_clone.retransmit(tcp_clone_2);
       });
       Ok(())
     }
@@ -619,7 +747,7 @@ impl Tcp {
               socket_key.local_port.unwrap_or_else(|| 0), 
               socket_key.remote_ip.unwrap_or_else(|| Ipv4Addr::new(0,0,0,0)), 
               socket_key.remote_port.unwrap_or_else(|| 0), 
-              socket.status.to_string()
+              socket.status.lock().unwrap().to_string()
           );
       }
       Ok(())
@@ -638,10 +766,16 @@ impl Tcp {
       let mut buffer = vec![0; MAX_SEGMENT_SIZE];
 
       let tcp_clone_2 = Arc::clone(&tcp);
+      let tcp_clone_3 = Arc::clone(&tcp);
       let mut stream_clone = stream.clone();
+      let mut stream_clone_2 = stream.clone();
       thread::spawn( move || {
         stream_clone.send_bytes(tcp_clone_2);
       });
+      thread::spawn( move || {
+        stream_clone_2.retransmit(tcp_clone_3);
+      });
+      
 
       // Read and send file contents
       loop {
@@ -665,6 +799,8 @@ impl Tcp {
       // Listen for incoming connections (handshake)
       let listener = TcpListener::listen(Arc::clone(&tcp), port)?;
       let socket = listener.accept(Arc::clone(&tcp))?;
+
+      // Might not need this
       if let TcpSocket::Stream(mut stream) = socket.tcp_socket.clone() {
         let tcp_clone_2 = Arc::clone(&tcp);
         thread::spawn( move || {
@@ -701,10 +837,14 @@ impl Tcp {
       Ok(())
     }
 
-    pub fn close_socket(tcp_clone: Arc<Mutex<Self>>, socket_id: u32) -> Result<(), TcpError> {
-      todo!();
+    /* 
+      `close_socket` is responsible for checking to see if a socket close can be initiated.
+      If there are no more bytes that need to be sent by the stream, the socket can be closed. 
+      This function sends a FIN ack to the remote host and sets the socket status to FIN_WAIT_1
+     */
+    pub fn close_socket(tcp_clone: Arc<Mutex<Self>>, socket_id: u32, is_active: bool) -> Result<(), TcpError> {
       // find the socket by ID
-      let socket;
+      let mut socket;
       {
         let safe_tcp = tcp_clone.lock().unwrap();
         (_, socket) = safe_tcp.get_socket_by_id(socket_id)
@@ -712,81 +852,88 @@ impl Tcp {
       }
 
       // check if the socket is valid and established
-      if socket.status != SocketStatus::Established {
+      let socket_status;
+      {
+        socket_status = socket.status.lock().unwrap().clone();
+      }
+      if socket_status != SocketStatus::Established {
         // whatever error here
         return Err(TcpError::ConnectionError { 
-          message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket.status.to_string()) 
+          message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket_status.to_string()) 
         })
       }
       // check if there is still data to send before sending a FIN (block or wait until it is ok to send a FIN)
       // this involves checking the send buffer (UNA == NXT == LBR) and the emptiness of retransmission queue 
       
       match socket.tcp_socket {
-        TcpSocket::Stream(mut stream) => {
-          while !stream.can_close() {
-            // block until it is ok to send a FIN
-            // no idea how to go about this
-            thread::sleep(Duration::from_millis(1000));
-          };
-          let status = stream.status.0.lock().unwrap();
-          // send a FIN
-          let packet = TcpPacket::new(
-            stream.socket_key.local_port.unwrap(),
-            stream.socket_key.remote_port.unwrap(),
-            status.seq_num + 1,
-            status.ack_num,
-            TcpFlags::FIN,
-            Vec::new(),
-          );
+        TcpSocket::Stream(stream) => {
+          let (send_lock, _, send_cv) = &*stream.send_buffer;
+
           {
+            let mut send_buf = send_lock.lock().unwrap();
+            // Check if send_buffer or rtq is fully empty.
+            let mut can_close = {
+              // check if send buffer is empty and retransmission queue is empty
+              println!("{}, {}", send_buf.is_empty(), stream.rtq.0.lock().unwrap().is_empty());
+              send_buf.is_empty() && stream.rtq.0.lock().unwrap().is_empty()
+            };
+            while !can_close {
+              send_buf = send_cv.wait(send_buf).unwrap();
+              can_close = {
+                // check if send buffer is empty and retransmission queue is empty
+                send_buf.is_empty() && stream.rtq.0.lock().unwrap().is_empty()
+              };
+            }
+          }
+
+          let fin_packet;
+          {
+            let mut status = stream.status.0.lock().unwrap();
+            let seq = status.seq_num;
+            // set the socket status to FIN_WAIT_1, don't want to upgrade seq or ack for no reason here
+            if is_active {
+              status.update(Some(SocketStatus::FinWait1), Some(seq + 1), None, None);
+              *socket.status.lock().unwrap() = SocketStatus::FinWait1;
+            } else {
+              // passive goes from close_wait to last_ack
+              status.update(Some(SocketStatus::LastAck), Some(seq + 1), None, None);
+              *socket.status.lock().unwrap() = SocketStatus::LastAck;
+            }
+            // create FIN packet
+            fin_packet = TcpPacket::new(
+              stream.socket_key.local_port.unwrap(),
+              stream.socket_key.remote_port.unwrap(),
+              status.seq_num,
+              status.ack_num,
+              TcpFlags::FIN,
+              Vec::new(),
+            );
+          }
+          
+          let fin_packet_clone = fin_packet.clone();
+          {
+            // send FIN packet
             let safe_tcp = tcp_clone.lock().unwrap();
-            safe_tcp.send_packet(packet, stream.socket_key.remote_ip.unwrap());
+            safe_tcp.send_packet(fin_packet, stream.socket_key.remote_ip.unwrap());
           }
-
-          // update state to FIN-WAIT-1
-          // for ethan: what is the cvar here
-          {
-            if let TcpSocket::Stream(stream) = socket.tcp_socket {
-                let (lock, cvar) = &*stream.status;
-                lock.lock().unwrap().update(Some(SocketStatus::FinWait1), Some(status.seq_num + 1), None, None);
-
-                // Notify waiting threads that a new connection is available
-                // is this needed or not needed? 
-                cvar.notify_all(); // changed one to all
-              } else {
-                return Err(TcpError::ConnectionError { message: "Socket found was not a TcpStream.".to_string()});
-              }
-          }
-
-          // wait to receive an ACK from the other side, which means we want to wait for an ACK of seq + 2 (they have acknowledges everything we sent before)
-          // can consider just waiting until the retransmission queue is empty, then updating the socket status to FinWait2
           
-          // wait to receive a FIN from the other side, probably need to get notified somehow through a condvar? not sure
-          // we would know if we receive a FIN in receive packet, so somehow it should know to jump to this part of the code? or maybe a separate function to handle the rest
-          
-          // when we receive a FIN and send the ACK, update our socket status to TIME_WAIT
+          // Insert into retransmission queue
           {
-            if let TcpSocket::Stream(stream) = socket.tcp_socket {
-                let (lock, cvar) = &*stream.status;
-                // double check the seq num and ack num (ack num should be what it was before but + 1, presumably was updated correctly when we received the ACK)
-                lock.lock().unwrap().update(Some(SocketStatus::TimeWait), None, Some(status.ack_num + 1), None);
-
-                // Notify waiting threads that a new connection is available
-                // i don't think this is needed?
-                cvar.notify_all(); // changed one to all
-              } else {
-                return Err(TcpError::ConnectionError { message: "Socket found was not a TcpStream.".to_string()});
-              }
+            let mut retrans_queue = stream.rtq.0.lock().unwrap();
+            retrans_queue.push_back(RTEntry {
+                packet: fin_packet_clone,
+                timestamp: Instant::now(),
+                retries: 0,
+            });
           }
-
-
-          // if FIN is received, wait 2 * MSL until initiate TCB deletion
-
+          stream.rtq.1.notify_all();
           Ok(())
-
         },
         TcpSocket::Listener(_) => {
-          return Err(TcpError::ConnectionError { message: "Socket was of type Listener rather than Stream.".to_string() });
+          todo!()
+          // update state
+          // remove from socket table
+          // listening thread in listen_and_accept
         }
       }
     }
@@ -802,9 +949,9 @@ impl Tcp {
     }
 
     // Remove a socket from the socket table
-    pub fn remove_socket(&self, key: SocketKey) {
+    pub fn remove_socket(&self, key: &SocketKey) {
         let mut socket_table = self.socket_table.lock().unwrap();
-        socket_table.remove(&key);
+        socket_table.remove(key);
     }
 
     // Get a socket from the socket table
@@ -818,7 +965,11 @@ impl Tcp {
         if let Some(port) = key.local_port {
             for (k, socket) in socket_table.iter() {
                 if k.local_port == Some(port) {
-                    match socket.status {
+                  let socket_status;
+                  {
+                    socket_status = socket.status.lock().unwrap().clone();
+                  }
+                    match socket_status {
                         SocketStatus::Listening => return Some(socket.clone()),
                         _ => continue,
                     }
@@ -852,5 +1003,22 @@ impl Tcp {
             Some(id) => id + 1,
             None => 0,
         }
+    }
+
+    pub fn is_listen(&self, port: u16) -> Option<Socket> {
+      if let Ok(socket_table) = self.socket_table.lock() {
+        for (socket_key, socket) in socket_table.iter() {
+          if let Some(listen_port) = socket_key.local_port {
+            let socket_status;
+            {
+              socket_status = socket.status.lock().unwrap().clone();
+            }
+            if listen_port == port && socket_status == SocketStatus::Listening {
+              return Some(socket.clone());
+            }
+          }
+        }
+      }
+      return None;
     }
 }

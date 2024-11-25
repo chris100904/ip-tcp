@@ -13,7 +13,7 @@ pub struct SendBuffer {
   pub una: u32,
   pub nxt: u32,
   pub lbw: u32, 
-  pub prev_lbw: u32, // represents previous lbw value
+  pub close: bool,
 }
 
 impl SendBuffer {
@@ -23,7 +23,7 @@ impl SendBuffer {
       una: 0,
       nxt: 0,
       lbw: 0,
-      prev_lbw: 0,
+      close: false,
     }
   }
 
@@ -33,7 +33,7 @@ impl SendBuffer {
       una: self.una, 
       nxt: self.nxt, 
       lbw: self.lbw,
-      prev_lbw: self.prev_lbw,
+      close: self.close,
     }
   }
 
@@ -54,7 +54,6 @@ impl SendBuffer {
     //   bytes_written -= 1;
     // }
     // should lbw be set here?
-    self.prev_lbw = self.lbw;
     self.lbw = self.lbw.wrapping_add(bytes_written as u32); 
     // println!("after lbw: {}, nxt: {}, una: {}, prev_lbw: {}", self.lbw, self.nxt, self.una, self.prev_lbw);
     bytes_written
@@ -70,7 +69,8 @@ impl SendBuffer {
   }
 
   pub fn is_empty(&self) -> bool {
-    self.lbw == self.una
+    println!("lbw: {}, nxt: {}, una: {}", self.lbw, self.nxt, self.una);
+    self.una.wrapping_sub(self.lbw.wrapping_add(1)) == 0
   }
 }
 
@@ -82,6 +82,7 @@ pub struct ReceiveBuffer {
   pub wnd: u16,
   pub lbr: u32,
   pub out_of_order: BTreeMap<u32, Vec<u8>>,
+  pub close: bool,
 }
 
 impl ReceiveBuffer {
@@ -92,6 +93,7 @@ impl ReceiveBuffer {
       wnd: BUFFER_SIZE.try_into().unwrap(), 
       lbr: 0,
       out_of_order: BTreeMap::new(),
+      close: false,
     }
   }
 
@@ -101,7 +103,8 @@ impl ReceiveBuffer {
       nxt: self.nxt,
       wnd: self.wnd,
       lbr: self.lbr,
-      out_of_order: self.out_of_order.clone()
+      out_of_order: self.out_of_order.clone(),
+      close: self.close,
     }
   }
   
