@@ -796,7 +796,7 @@ impl TcpStream {
           }
         }
       } else {
-        thread::sleep(Duration::from_micros(self.rto) - rt_entry.timestamp.elapsed());
+        // thread::sleep(Duration::from_micros(self.rto) - rt_entry.timestamp.elapsed());
       }
     }
   }

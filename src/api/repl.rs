@@ -11,6 +11,7 @@ pub fn repl(sender: Sender<CommandType>) -> Result<()> {
         match readline {
             Ok(line) => {
                 let args: Vec<&str> = line.split_whitespace().collect();
+                let send_args: Vec<&str> = line.splitn(3, char::is_whitespace).collect();
                 if args.is_empty() {
                     continue;
                 }
@@ -78,8 +79,8 @@ pub fn repl(sender: Sender<CommandType>) -> Result<()> {
                     }
                     }
                     "s" => {
-                        if args.len() == 3 {
-                            sender.send(CommandType::TCP(TCPCommand::TCPSend(args[1].parse().unwrap(), args[2].to_string()))).unwrap();
+                        if send_args.len() == 3 {
+                            sender.send(CommandType::TCP(TCPCommand::TCPSend(send_args[1].parse().unwrap(), send_args[2].to_string()))).unwrap();
                         } else {
                             println!("Usage: s <socket ID> <bytes>");
                         }
