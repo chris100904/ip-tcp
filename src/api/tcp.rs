@@ -819,7 +819,6 @@ impl Tcp {
 
       // Close the connection
       let _ = Tcp::close_socket(tcp.clone(), stream.id, true);
-      tcp.lock().unwrap().remove_socket(&stream.socket_key);
       Ok(())
     }
 
