@@ -892,7 +892,7 @@ impl Tcp {
       {
         socket_status = socket.status.lock().unwrap().clone();
       }
-      if is_active && socket_status != SocketStatus::Established {
+      if is_active && socket_status != SocketStatus::Established && socket_status != SocketStatus::Listening{
         // whatever error here
         return Err(TcpError::ConnectionError { 
           message: format!("Invalid socket status for socket {}: {}", socket.socket_id, socket_status.to_string()) 
@@ -900,7 +900,7 @@ impl Tcp {
       }
       // check if there is still data to send before sending a FIN (block or wait until it is ok to send a FIN)
       // this involves checking the send buffer (UNA == NXT == LBR) and the emptiness of retransmission queue 
-      
+      println!("903");
       match socket.tcp_socket {
         TcpSocket::Stream(stream) => {
           let (send_lock, _, send_cv) = &*stream.send_buffer;
@@ -968,20 +968,24 @@ impl Tcp {
           Ok(())
         },
         TcpSocket::Listener(listener) => {
-          // extract cvar from listener
-          let (_, cvar) = &*listener.incoming_connections;
-          {
+          
+            // Push a unique "close" connection
+            let (lock, cvar) = &*listener.incoming_connections;
+            {
+                let mut conns = lock.lock().unwrap();
+                conns.push_back(Connection {
+                    socket_key: SocketKey { local_ip: None, local_port: None, remote_ip: None, remote_port: None },
+                    seq_num: 0,
+                    ack_num: 0,
+                    window: 0,
+                });
+            }
             cvar.notify_all();
-          }
-          // update state
-          let socket_key = tcp_clone.lock().unwrap().get_socket_by_id(socket_id).unwrap().0;
-          // let socket: Socket = tcp_clone.lock().unwrap().get_socket(socket_key).unwrap();
-          // let mut status = socket.status.lock().unwrap();
-          // status
-          // *status = SocketStatus::Closing;
-          // remove from socket table
-          tcp_clone.lock().unwrap().remove_socket(&socket_key);
-          Ok(())
+            // Remove the listening socket from the socket table
+            let socket_key = tcp_clone.lock().unwrap().get_socket_by_id(socket_id).unwrap().0;
+            tcp_clone.lock().unwrap().remove_socket(&socket_key);
+            println!("Listening socket removed and closed");
+            Ok(())
         }
       }
     }

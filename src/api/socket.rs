@@ -1,6 +1,7 @@
 use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap,  VecDeque};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,7 +43,6 @@ pub struct TcpListener {
   // This may not need to have Arc Mutex because it is being wrapped in the socket table.
   pub incoming_connections: Arc<(Mutex<VecDeque<Connection>>, Condvar)>,
   pub id: u32,
-  pub close: bool,
 }
 
 impl TcpListener {
@@ -50,7 +50,6 @@ impl TcpListener {
     TcpListener { 
       incoming_connections: Arc::clone(&self.incoming_connections),
       id: self.id,
-      close: false,
     }
   }
 
@@ -62,7 +61,6 @@ impl TcpListener {
       let tcp_listener = TcpListener {
         incoming_connections: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
         id: socket_id,
-        close: false,
       };
       
       let listening_socket = Socket::new(socket_id, SocketStatus::Listening, TcpSocket::Listener(tcp_listener.clone()));
@@ -94,6 +92,12 @@ impl TcpListener {
       connection = incoming_conns.pop_front().unwrap();
     }
     
+    // unique combination for connection to close
+    if connection.socket_key.local_ip == None && connection.socket_key.local_port == None && connection.socket_key.remote_ip == None && 
+      connection.socket_key.remote_port == None && connection.seq_num == 0 && connection.ack_num == 0 && connection.window == 0 {
+      return Err(TcpError::ListenerError { message: "Listener is closed".to_string()})
+    }
+
     let port = connection.socket_key.local_port
       .ok_or(TcpError::ConnectionError { message: "Local port not found".to_string() })?;
     let dst_port = connection.socket_key.remote_port
