@@ -180,8 +180,8 @@ impl Tcp {
       match socket.tcp_socket {
         TcpSocket::Stream(mut stream) => {
           let data = bytes.as_bytes();
-          println!("{:?}", data);
-          println!("184 STARTING SEQ: {}", stream.status.0.lock().unwrap().seq_num);
+          // println!("{:?}", data);
+          // println!("184 STARTING SEQ: {}", stream.status.0.lock().unwrap().seq_num);
           let result = stream.write(data);
         },
         TcpSocket::Listener(_) => {
@@ -296,7 +296,7 @@ impl Tcp {
 
     // Receive a packet
     pub fn receive_packet(tcp_clone: Arc<Mutex<Tcp>>, packet: Packet) -> Result<(), TcpError> {
-      let tcp_packet = TcpPacket::parse_tcp(&packet.payload)
+      let tcp_packet = TcpPacket::parse_tcp(packet.src_ip, packet.dst_ip, &packet.payload)
         .map_err(|e| TcpError::ConnectionError { message: format!("Error parsing packet. Source: {}", e) })?;
       // NOTE: src_ip and dest_ip and ports are FLIPPED because we want to check if the dest_ip is our source_ip, etc. 
       let socket_key = SocketKey {
@@ -336,7 +336,7 @@ impl Tcp {
             })
           } else {
             // If not, drop the packet.
-            return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
+            return Err(TcpError::ConnectionError { message: "SYN: No listening socket found.".to_string() });
           }
         },
         flag if flag == TcpFlags::SYN | TcpFlags::ACK => {
@@ -397,6 +397,7 @@ impl Tcp {
               // Notify the thread looking to update the buffers in response to these.
               // Specifically, if the ACK number / window size changed, then update the send_buffer.
               // If there is data in the payload, then the receive_buffer should be changed.
+              println!("received ACK {}", tcp_packet.ack_num);
               if let TcpSocket::Stream(mut stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
                 {
@@ -417,26 +418,33 @@ impl Tcp {
                     }
                   }
                   {
+                    println!("421");
                     // Remove acknowledged packets from retransmission queue
                     let mut rtq = stream.rtq.0.lock().unwrap();
                     rtq.retain(|entry| {
                       // Check if packet is acknowledged
                       if entry.packet.seq_num + (entry.packet.payload.len() as u32) <= tcp_packet.ack_num {
+                        println!("{:?}, {:?}", entry.packet.seq_num, entry.packet.payload.len());
                           // Calculate RTT only for packets that weren't retransmitted
                           if entry.retries == 0 {
                               let measured_rtt = entry.timestamp.elapsed().as_millis() as u64;
-                              
-                              stream.srtt = measured_rtt;
-                              let rto_max;
-                              let rto_min;
-                              {
-                                rto_max = tcp_clone.lock().unwrap().rto_max;
-                                rto_min = tcp_clone.lock().unwrap().rto_min;
+                              let mut srtt = stream.srtt.lock().unwrap();
+                              let mut rto = stream.rto.lock().unwrap();
+                              if *srtt == 0 {
+                                *srtt = measured_rtt;
+                                *rto = *srtt + (2 * measured_rtt);
+                              } else {
+                                *srtt = ((*srtt * 4) / 5) + (measured_rtt / 5) as u64;
+                                let (rto_min, rto_max) = {
+                                  let tcp = tcp_clone.lock().unwrap();
+                                  (tcp.rto_min.clone(), tcp.rto_max.clone())
+                                };
+                                // println!("RTO MAX: {}, RTO MIN: {}", rto_max, rto_min);
+                                *rto = std::cmp::max(rto_min, std::cmp::min(rto_max, (1.5 * *srtt as f64) as u64));
+                                // *rto = std::cmp::min(rto_max, std::cmp::max(rto_min, (1.5 * *srtt as f64) as u64));
+                                println!("Measured RTT: {}, SRTT: {}, RTO: {}", measured_rtt, *srtt, *rto);
                               }
-                              // println!("RTO MAX: {}, RTO MIN: {}", rto_max, rto_min);
-                              stream.rto = std::cmp::min(rto_max, std::cmp::max(rto_min, (1.5 * stream.srtt as f64) as u64));
-                              // println!("Measured RTT: {}, SRTT: {}, RTO: {}", measured_rtt, stream.srtt, stream.rto);
-                          }
+                            }
                           false  // Remove this entry
                       } else {
                           true   // Keep this entry
@@ -450,30 +458,27 @@ impl Tcp {
                 // TODO: SET NXT VALUE
                 // TODO: THINK OF A BETTER WAY TO GET THE VALUES OF THE ACK RESPONSE PACKET
                 if tcp_packet.payload.len() != 0 {
-                  // println!("NXT: {}, SEQ RECEIVED: {}", recv_buf.nxt, tcp_packet.seq_num);
-                  // println!("ACK: {}", tcp_packet.ack_num);
+                  println!("NXT: {}, SEQ RECEIVED: {}", recv_buf.nxt, tcp_packet.seq_num);
+                  println!("ACK: {}", tcp_packet.ack_num);
                   println!("Received packet with data! SEQ: {}, NXT: {}", tcp_packet.seq_num, recv_buf.nxt);
+                  let mut status = lock.lock().unwrap();
                   if tcp_packet.seq_num >= recv_buf.nxt {
-                    println!("Writing {} into recv_buf at position {}", String::from_utf8_lossy(&tcp_packet.payload), tcp_packet.seq_num);
+                    // println!("Writing {} into recv_buf at position {}", String::from_utf8_lossy(&tcp_packet.payload), tcp_packet.seq_num);
                     let _ = recv_buf.write(tcp_packet.seq_num, &tcp_packet.payload);
                     recv_cv.notify_all();
-                    
-                    let mut status = lock.lock().unwrap();
-                    
                     status.update(None, None, Some(recv_buf.nxt), None);
-
-                    let src_port = tcp_packet.dst_port;
-                    let dst_port = tcp_packet.src_port;
-                    let ack_response = TcpPacket::new_ack(
-                      src_port,
-                      dst_port, 
-                      status.seq_num, 
-                      status.ack_num, 
-                      recv_buf.wnd, 
-                      Vec::new());
-                    println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_response.seq_num, ack_response.ack_num, ack_response.window);
-                    tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
-                  }
+                  } 
+                  let src_port = tcp_packet.dst_port;
+                  let dst_port = tcp_packet.src_port;
+                  let ack_response = TcpPacket::new_ack(
+                    src_port,
+                    dst_port, 
+                    status.seq_num, 
+                    status.ack_num, 
+                    recv_buf.wnd, 
+                    Vec::new());
+                  println!("Ack response: SEQ: {} ACK: {} WND: {}", ack_response.seq_num, ack_response.ack_num, ack_response.window);
+                  tcp_clone.lock().unwrap().send_packet(ack_response, packet.src_ip);
                 }
               }
             } else if socket_status == SocketStatus::FinWait1 {
@@ -541,7 +546,7 @@ impl Tcp {
               }
             } else {
               // If not, drop the packet.
-              return Err(TcpError::ConnectionError { message: "No listening socket found.".to_string() });
+              return Err(TcpError::ConnectionError { message: "LastAck: No listening socket found.".to_string() });
             }
             
           })
@@ -724,7 +729,7 @@ impl Tcp {
     }
 
     pub fn send_packet(&self, packet: TcpPacket, dst_ip: Ipv4Addr) {
-      println!("Sent {:?}", String::from_utf8_lossy(&packet.payload));
+      // println!("Sent {:?}", String::from_utf8_lossy(&packet.payload));
       self.tcp_send_ip.send((packet, dst_ip));
     }
 
@@ -803,22 +808,22 @@ impl Tcp {
         stream_clone_2.retransmit(tcp_clone_3);
       });
       
-
+      let mut byte_count = 0;
       // Read and send file contents
       loop {
         match reader.read(&mut buffer) {
           Ok(0) => break, // EOF
           Ok(n) => {
-            stream.write(&buffer[..n])?;
+            byte_count += stream.write(&buffer[..n])?;
           },
           Err(e) => return Err(TcpError::FileError {
             message: format!("Error reading file: {}", e)
           }),
         }
       }
-
       // Close the connection
       let _ = Tcp::close_socket(tcp.clone(), stream.id, true);
+      println!("Sent {} bytes from file {}.", byte_count, file_path);
       Ok(())
     }
 
@@ -844,20 +849,28 @@ impl Tcp {
       };
 
       let tcp_socket = socket.tcp_socket;
+      let mut byte_count = 0;
       if let TcpSocket::Stream(mut stream) = tcp_socket {
         loop {
           match stream.read(MAX_SEGMENT_SIZE as u32) {
             // how to exit this loop
             Ok(data) => {
-              println!("Read bytes: {}", String::from_utf8_lossy(&data));
-              file.write_all(&data).map_err(|e| TcpError::FileError { 
+              // println!("Read bytes: {}", String::from_utf8_lossy(&data));
+              byte_count += file.write(&data).map_err(|e| TcpError::FileError { 
                 message: format!("Error writing to file: {}", e) 
               })?;
             },
-            Err(e) => return Err(e),
+            Err(e) => {
+              if let TcpError::ReadError { message } = e {
+                break;
+              } else {
+                return Err(e);
+              }
+            }
           }
         }
       }
+      println!("Successfully wrote {} bytes into {}.", byte_count, file_path );
       Ok(())
     }
 
@@ -897,7 +910,7 @@ impl Tcp {
             // Check if send_buffer or rtq is fully empty.
             let mut can_close = {
               // check if send buffer is empty and retransmission queue is empty
-              println!("{}, {}", send_buf.is_empty(), stream.rtq.0.lock().unwrap().is_empty());
+              println!("906: {}, {}", send_buf.is_empty(), stream.rtq.0.lock().unwrap().is_empty());
               send_buf.is_empty() && stream.rtq.0.lock().unwrap().is_empty()
             };
             while !can_close {
@@ -954,11 +967,21 @@ impl Tcp {
           stream.rtq.1.notify_all();
           Ok(())
         },
-        TcpSocket::Listener(_) => {
-          todo!()
+        TcpSocket::Listener(listener) => {
+          // extract cvar from listener
+          let (_, cvar) = &*listener.incoming_connections;
+          {
+            cvar.notify_all();
+          }
           // update state
+          let socket_key = tcp_clone.lock().unwrap().get_socket_by_id(socket_id).unwrap().0;
+          // let socket: Socket = tcp_clone.lock().unwrap().get_socket(socket_key).unwrap();
+          // let mut status = socket.status.lock().unwrap();
+          // status
+          // *status = SocketStatus::Closing;
           // remove from socket table
-          // listening thread in listen_and_accept
+          tcp_clone.lock().unwrap().remove_socket(&socket_key);
+          Ok(())
         }
       }
     }

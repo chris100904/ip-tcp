@@ -3,7 +3,7 @@ use etherparse::{IpNumber, Ipv4HeaderSlice, PacketBuilder, TcpHeader, TcpHeaderS
 use bitflags::bitflags;
 use std::net::Ipv4Addr;
 
-use super::buffer::BUFFER_SIZE;
+use super::{buffer::BUFFER_SIZE, error::TcpError};
 
 #[derive(Debug)]
 pub struct Packet {
@@ -180,9 +180,9 @@ impl TcpPacket {
     result
   }
 
-  pub fn parse_tcp(raw_data: &[u8]) -> Result<TcpPacket, String> {
+  pub fn parse_tcp(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, raw_data: &[u8]) -> Result<TcpPacket, TcpError> {
     let tcp_slice = TcpHeaderSlice::from_slice(raw_data)
-        .map_err(|e| format!("Failed to parse TCP header: {}", e))?;
+        .map_err(|e| TcpError::PacketError { message: format!("Failed to parse TCP header: {}", e)})?;
 
     let header = tcp_slice.to_header();
 
@@ -193,6 +193,15 @@ impl TcpPacket {
     let payload = &raw_data[header_len..];
 
     // TODO: Validations? (Flags, checksum)
+    let checksum = header
+      .calc_checksum_ipv4_raw(src_ip.octets(), 
+      dst_ip.octets(), payload)
+      .map_err(|e| TcpError::PacketError { message: format!("Failed to calculate TCP Checksum: {}", e)})?;
+
+    if header.checksum != checksum {
+      return Err(TcpError::PacketError { message: "Invalid checksum.".to_string() });
+    }
+
     Ok(TcpPacket {
         src_port: header.source_port,
         dst_port: header.destination_port,

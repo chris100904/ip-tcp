@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-pub const BUFFER_SIZE: usize = 10; // 65535
+pub const BUFFER_SIZE: usize = 250;
 
 #[derive(Clone, Debug)]
 pub struct SendBuffer {
@@ -69,7 +69,7 @@ impl SendBuffer {
   }
 
   pub fn is_empty(&self) -> bool {
-    println!("lbw: {}, nxt: {}, una: {}", self.lbw, self.nxt, self.una);
+    // println!("lbw: {}, nxt: {}, una: {}", self.lbw, self.nxt, self.una);
     self.una.wrapping_sub(self.lbw.wrapping_add(1)) == 0
   }
 }
@@ -137,7 +137,7 @@ impl ReceiveBuffer {
 
         // Update window size
         // println!("PREV WND: {}", self.wnd);
-        println!("BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", BUFFER_SIZE, self.nxt, self.lbr);
+        // println!("BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", BUFFER_SIZE, self.nxt, self.lbr);
         self.wnd = (BUFFER_SIZE - (self.nxt.wrapping_sub(self.lbr.wrapping_add(1)) as usize)) as u16;
         // println!("WND: {} = BUFFER_SIZE: {} - (NXT: {} - (LBR: {} + 1))", self.wnd, BUFFER_SIZE, self.nxt, self.lbr);
         // println!("POST WND: {}", self.wnd);
@@ -223,7 +223,7 @@ impl CircularBuffer {
             current_seq = current_seq.wrapping_add(1);
             bytes_written += 1
         }
-        println!("Wrote bytes: {}", String::from_utf8_lossy(data));
+        // println!("Wrote bytes: {}", String::from_utf8_lossy(data));
         // println!("NOT WRITTEN circ_buf: current_seq: {}", current_seq);
         // println!("{:?}", self.buffer[self.seq_to_index(current_seq) - 1 as usize]);
         bytes_written 
