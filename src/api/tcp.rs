@@ -421,36 +421,41 @@ impl Tcp {
                     println!("421");
                     // Remove acknowledged packets from retransmission queue
                     let mut rtq = stream.rtq.0.lock().unwrap();
+                    let mut updated_rtt = false; // Flag to track if RTT/SRTT was updated
                     rtq.retain(|entry| {
-                      // Check if packet is acknowledged
-                      if entry.packet.seq_num + (entry.packet.payload.len() as u32) <= tcp_packet.ack_num {
-                        // println!("{:?}, {:?}", entry.packet.seq_num, entry.packet.payload.len());
-                          // Calculate RTT only for packets that weren't retransmitted
-                          if entry.retries == 0 {
-                              let measured_rtt = entry.timestamp.elapsed().as_micros() as u64;
-                              let mut srtt = stream.srtt.lock().unwrap();
-                              let mut rto = stream.rto.lock().unwrap();
-                              if *srtt == 0 {
-                                *srtt = measured_rtt;
-                                *rto = *srtt + (2 * measured_rtt);
-                              } else {
-                                println!("PREV SRTT: {}", *srtt);
-                                *srtt = ((*srtt * 4) / 5) + (measured_rtt / 5) as u64;
-                                println!("POST SRTT: {}", *srtt);
-                                let (rto_min, rto_max) = {
-                                  let tcp = tcp_clone.lock().unwrap();
-                                  (tcp.rto_min.clone(), tcp.rto_max.clone())
-                                };
-                                // println!("RTO MAX: {}, RTO MIN: {}", rto_max, rto_min);
-                                *rto = std::cmp::max(rto_min, std::cmp::min(rto_max, (1.5 * *srtt as f64) as u64));
-                                // *rto = std::cmp::min(rto_max, std::cmp::max(rto_min, (1.5 * *srtt as f64) as u64));
-                                println!("Measured RTT: {}, SRTT: {}, RTO: {}", measured_rtt, *srtt, *rto);
-                              }
+                        // Check if packet is acknowledged
+                        if entry.packet.seq_num + (entry.packet.payload.len() as u32) <= tcp_packet.ack_num {
+                            // Calculate RTT only for the first packet being removed
+                            if !updated_rtt && entry.retries == 0 {
+                                let measured_rtt = entry.timestamp.elapsed().as_micros() as u64;
+                                let mut srtt = stream.srtt.lock().unwrap();
+                                let mut rto = stream.rto.lock().unwrap();
+                                if *srtt == 0 {
+                                    // Initialize SRTT and RTO
+                                    *srtt = measured_rtt;
+                                    *rto = *srtt + (4 * (measured_rtt / 2));
+                                } else {
+                                    println!("PREV SRTT: {}", *srtt);
+                                    let measured_rtt_f64 = measured_rtt as f64;
+                                    let srtt_f64 = *srtt as f64;
+                                    *srtt = ((7.0 / 8.0) * srtt_f64 + (1.0 / 8.0) * measured_rtt_f64) as u64;
+                                    println!("POST SRTT: {}", *srtt);
+                                    
+                                    // Update RTO with clamping
+                                    let (rto_min, rto_max) = {
+                                        let tcp = tcp_clone.lock().unwrap();
+                                        (tcp.rto_min.clone(), tcp.rto_max.clone())
+                                    };
+                                    let rto_f64 = (1.3 * *srtt as f64).clamp(rto_min as f64, rto_max as f64);
+                                    *rto = rto_f64 as u64;
+                                    println!("Measured RTT: {}, SRTT: {}, RTO: {}", measured_rtt, *srtt, *rto);
+                                }
+                                updated_rtt = true; // Mark that RTT/SRTT was updated for this ACK
                             }
-                          false  // Remove this entry
-                      } else {
-                          true   // Keep this entry
-                      }
+                            false // Remove this entry
+                        } else {
+                            true // Keep this entry
+                        }
                     });
                   }
                 }

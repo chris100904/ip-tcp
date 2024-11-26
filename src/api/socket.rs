@@ -776,7 +776,10 @@ impl TcpStream {
       {
         rto = self.rto.lock().unwrap().clone();
       }
-      if rt_entry.timestamp.elapsed() >= Duration::from_millis(rto) {
+      println!("time elapsed: {}", rt_entry.timestamp.elapsed().as_micros());
+      println!("RTO: {}", rto);
+      if rt_entry.timestamp.elapsed().as_millis() >= rto.into() {
+        println!("782");
         for i in 0..RT_MAX {
           // Send retransmission
           {
