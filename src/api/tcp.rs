@@ -424,17 +424,19 @@ impl Tcp {
                     rtq.retain(|entry| {
                       // Check if packet is acknowledged
                       if entry.packet.seq_num + (entry.packet.payload.len() as u32) <= tcp_packet.ack_num {
-                        println!("{:?}, {:?}", entry.packet.seq_num, entry.packet.payload.len());
+                        // println!("{:?}, {:?}", entry.packet.seq_num, entry.packet.payload.len());
                           // Calculate RTT only for packets that weren't retransmitted
                           if entry.retries == 0 {
-                              let measured_rtt = entry.timestamp.elapsed().as_millis() as u64;
+                              let measured_rtt = entry.timestamp.elapsed().as_micros() as u64;
                               let mut srtt = stream.srtt.lock().unwrap();
                               let mut rto = stream.rto.lock().unwrap();
                               if *srtt == 0 {
                                 *srtt = measured_rtt;
                                 *rto = *srtt + (2 * measured_rtt);
                               } else {
+                                println!("PREV SRTT: {}", *srtt);
                                 *srtt = ((*srtt * 4) / 5) + (measured_rtt / 5) as u64;
+                                println!("POST SRTT: {}", *srtt);
                                 let (rto_min, rto_max) = {
                                   let tcp = tcp_clone.lock().unwrap();
                                   (tcp.rto_min.clone(), tcp.rto_max.clone())

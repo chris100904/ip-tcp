@@ -13,7 +13,7 @@ use super::buffer::{CircularBuffer, ReceiveBuffer, SendBuffer};
 use super::error::TcpError;
 use super::tcp::{Socket, Tcp};
 
-pub const MAX_SEGMENT_SIZE: usize = 2;
+pub const MAX_SEGMENT_SIZE: usize = 536;
 pub const RT_MAX: usize = 5;
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
@@ -166,7 +166,7 @@ impl TcpListener {
 
       {
         let tcp = tcp_clone.lock().unwrap();
-        let measured_rtt_u64 = measured_rtt.as_millis() as u64;
+        let measured_rtt_u64 = measured_rtt.as_micros() as u64;
 
         // Assign the smoothed RTT and calculate RTO
         // TODO RTO STREAM 
@@ -431,11 +431,11 @@ impl TcpStream {
 
     // Calculate RTT using the time difference from when SYN-ACK was sent to now
     let measured_rtt = syn_ack_time.elapsed();
-    println!("TIME ELAPSED: {}", measured_rtt.as_millis());
+    println!("TIME ELAPSED: {}", measured_rtt.as_micros());
 
     {
       let tcp = tcp_clone.lock().unwrap();
-      let measured_rtt_u64 = measured_rtt.as_millis() as u64;
+      let measured_rtt_u64 = measured_rtt.as_micros() as u64;
 
       // Assign the smoothed RTT and calculate RTO
       // TODO RTO STREAM

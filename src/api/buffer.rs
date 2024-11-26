@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-pub const BUFFER_SIZE: usize = 250;
+pub const BUFFER_SIZE: usize = 65535;
 
 #[derive(Clone, Debug)]
 pub struct SendBuffer {
