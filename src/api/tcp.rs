@@ -400,10 +400,61 @@ impl Tcp {
               println!("received ACK {}", tcp_packet.ack_num);
               if let TcpSocket::Stream(mut stream) = socket.tcp_socket {
                 let (lock, cvar) = &*stream.status;
+                println!("403");
                 {
                   let (send_lock, send_cv, send_write_cv) = &*stream.send_buffer;
                   let mut send_buf = send_lock.lock().unwrap();
+                  println!("408");
                   if tcp_packet.ack_num > send_buf.una {
+                    {
+                      println!("421");
+                      // Remove acknowledged packets from retransmission queue
+                      let mut rtq = stream.rtq.0.lock().unwrap();
+                      println!("424");
+                      let mut updated_rtt = false; // Flag to track if RTT/SRTT was updated
+                      rtq.retain(|entry| {
+                        // Check if packet is acknowledged
+                        if entry.packet.seq_num + (entry.packet.payload.len() as u32) <= tcp_packet.ack_num {
+                          println!("430");
+                            // Calculate RTT only for the first packet being removed
+                            if !updated_rtt && entry.retries == 0 {
+                              println!("433");
+                              let measured_rtt = entry.timestamp.elapsed().as_micros() as u64;
+                              let mut rto_srtt = stream.rto_srtt.lock().unwrap();
+                              println!("438");
+                              if rto_srtt.1 == 0 {
+                                // Initialize SRTT and RTO
+                                rto_srtt.1 = measured_rtt;
+                                rto_srtt.0 = rto_srtt.1 + (4 * (measured_rtt / 2));
+                                println!("Initialized: {}, {}", rto_srtt.0, rto_srtt.1);
+                              } else {
+                                  println!("PREV SRTT: {}", rto_srtt.1);
+                                  let measured_rtt_f64 = measured_rtt as f64;
+                                  let srtt_f64 = rto_srtt.1 as f64;
+                                  rto_srtt.1 = ((7.0 / 8.0) * srtt_f64 + (1.0 / 8.0) * measured_rtt_f64) as u64;
+                                  println!("POST SRTT: {}", rto_srtt.1);
+                                  
+                                  // Update RTO with clamping
+                                  let (rto_min, rto_max) = {
+                                      let tcp = tcp_clone.lock().unwrap();
+                                      (tcp.rto_min.clone(), tcp.rto_max.clone())
+                                  };
+                                  println!("{}", 1.3 * rto_srtt.1 as f64);
+                                  let rto_f64 = (1.3 * rto_srtt.1 as f64).clamp(rto_min as f64, rto_max as f64);
+                                  rto_srtt.0 = rto_f64 as u64;
+                        
+                                  println!("Measured RTT: {}, SRTT: {}, RTO: {}", measured_rtt, rto_srtt.1, rto_srtt.0);
+                              }
+                              println!("459");
+                              updated_rtt = true; // Mark that RTT/SRTT was updated for this ACK
+                            }
+                            println!("Removing {}", entry.packet.seq_num);
+                            false // Remove this entry
+                        } else {
+                            true // Keep this entry
+                        }
+                      });
+                    }
                     println!("Received ack {} is higher than our send.una {}, updating window size", tcp_packet.ack_num, send_buf.una);
                     send_buf.una = tcp_packet.ack_num;
                     send_write_cv.notify_all();
@@ -417,50 +468,10 @@ impl Tcp {
                       cvar.notify_all();
                     }
                   }
-                  {
-                    println!("421");
-                    // Remove acknowledged packets from retransmission queue
-                    let mut rtq = stream.rtq.0.lock().unwrap();
-                    let mut updated_rtt = false; // Flag to track if RTT/SRTT was updated
-                    rtq.retain(|entry| {
-                        // Check if packet is acknowledged
-                        if entry.packet.seq_num + (entry.packet.payload.len() as u32) <= tcp_packet.ack_num {
-                            // Calculate RTT only for the first packet being removed
-                            if !updated_rtt && entry.retries == 0 {
-                                let measured_rtt = entry.timestamp.elapsed().as_micros() as u64;
-                                let mut srtt = stream.srtt.lock().unwrap();
-                                let mut rto = stream.rto.lock().unwrap();
-                                if *srtt == 0 {
-                                    // Initialize SRTT and RTO
-                                    *srtt = measured_rtt;
-                                    *rto = *srtt + (4 * (measured_rtt / 2));
-                                } else {
-                                    println!("PREV SRTT: {}", *srtt);
-                                    let measured_rtt_f64 = measured_rtt as f64;
-                                    let srtt_f64 = *srtt as f64;
-                                    *srtt = ((7.0 / 8.0) * srtt_f64 + (1.0 / 8.0) * measured_rtt_f64) as u64;
-                                    println!("POST SRTT: {}", *srtt);
-                                    
-                                    // Update RTO with clamping
-                                    let (rto_min, rto_max) = {
-                                        let tcp = tcp_clone.lock().unwrap();
-                                        (tcp.rto_min.clone(), tcp.rto_max.clone())
-                                    };
-                                    let rto_f64 = (1.3 * *srtt as f64).clamp(rto_min as f64, rto_max as f64);
-                                    *rto = rto_f64 as u64;
-                                    println!("Measured RTT: {}, SRTT: {}, RTO: {}", measured_rtt, *srtt, *rto);
-                                }
-                                updated_rtt = true; // Mark that RTT/SRTT was updated for this ACK
-                            }
-                            false // Remove this entry
-                        } else {
-                            true // Keep this entry
-                        }
-                    });
-                  }
                 }
                 let (recv_lock, recv_cv) = &*stream.receive_buffer;
                 let mut recv_buf = recv_lock.lock().unwrap();
+                println!("473");
 
                 // TODO: SET NXT VALUE
                 // TODO: THINK OF A BETTER WAY TO GET THE VALUES OF THE ACK RESPONSE PACKET
@@ -507,7 +518,8 @@ impl Tcp {
                 {
                   // Remove acknowledged packets from retransmission queue
                   let mut rtq = stream.rtq.0.lock().unwrap();
-                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) > tcp_packet.ack_num);
+                  rtq.retain(|entry| entry.packet.seq_num + (entry.packet.payload.len() as u32) > tcp_packet.ack_num
+                );
                 }
               }
             } else if socket_status == SocketStatus::Closing {
@@ -563,6 +575,7 @@ impl Tcp {
           todo!()
         },
         flag if flag == TcpFlags::FIN => {
+          println!("RECEIVED FIN");
           // Check if connection is already in the socket table
           // Valid statuses: ESTABLISHED, FIN-WAIT1, FIN-WAIT2
           let opt_socket;

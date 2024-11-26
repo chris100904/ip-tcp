@@ -172,10 +172,10 @@ impl TcpListener {
         // TODO RTO STREAM 
         if let Ok(mut socket_table) = tcp.socket_table.lock() {
           if let TcpSocket::Stream(stream) = &mut socket_table.get_mut(&connection.socket_key).unwrap().tcp_socket {
-            let mut srtt = stream.srtt.lock().unwrap();
-            let mut rto = stream.rto.lock().unwrap();
-            *srtt = measured_rtt_u64;
-            *rto = *srtt + (2 * measured_rtt_u64);
+            let mut rto_srtt = stream.rto_srtt.lock().unwrap();
+            rto_srtt.0 = tcp.rto_min;
+            // rto_srtt.0 = measured_rtt_u64;
+            // rto_srtt.0 = rto_srtt.1 + (2 * measured_rtt_u64);
           } else {
             return Err(TcpError::ListenerError { 
                 message: "Socket table contained TcpListener rather than TcpStream.".to_string() 
@@ -264,8 +264,7 @@ pub struct TcpStream {
   // later on, and in the receiving case, you'll need to handle receiving packets out of order.
   pub rtq: Arc<(Mutex<VecDeque<RTEntry>>, Condvar)>,
 
-  pub rto: Arc<Mutex<u64>>, 
-  pub srtt: Arc<Mutex<u64>>,
+  pub rto_srtt: Arc<Mutex<(u64, u64)>>, 
   pub id: u32,
 }
 
@@ -327,9 +326,8 @@ impl TcpStream {
       send_buffer: Arc::new((Mutex::new(SendBuffer::new()), Condvar::new(), Condvar::new())), 
       receive_buffer: Arc::new((Mutex::new(ReceiveBuffer::new()), Condvar::new())), 
       rtq: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
-      rto: Arc::new(Mutex::new(0)),
+      rto_srtt: Arc::new(Mutex::new((0, 0))),
       id,
-      srtt: Arc::new(Mutex::new(0)),
     }
   }
 
@@ -340,8 +338,7 @@ impl TcpStream {
       send_buffer: Arc::clone(&self.send_buffer), 
       receive_buffer: Arc::clone(&self.receive_buffer),
       rtq: Arc::clone(&self.rtq),
-      srtt: Arc::clone(&self.srtt),
-      rto: Arc::clone(&self.rto),
+      rto_srtt: Arc::clone(&self.rto_srtt),
       id: self.id,
     }
   }
@@ -441,10 +438,10 @@ impl TcpStream {
       // TODO RTO STREAM
       if let Ok(mut socket_table) = tcp.socket_table.lock() {
         if let TcpSocket::Stream(stream) = &mut socket_table.get_mut(&socket_key).unwrap().tcp_socket {
-          let mut srtt = stream.srtt.lock().unwrap();
-          let mut rto = stream.rto.lock().unwrap();
-          *srtt = measured_rtt_u64;
-          *rto = *srtt + (2 * measured_rtt_u64);
+          let mut rto_srtt = stream.rto_srtt.lock().unwrap();
+          // rto_srtt.1 = measured_rtt_u64;
+          // rto_srtt.0 = rto_srtt.1 + (2 * measured_rtt_u64);
+          rto_srtt.0 = tcp.rto_min;
         } else {
           return Err(TcpError::ListenerError { 
               message: "Socket table contained TcpListener rather than TcpStream.".to_string() 
@@ -737,6 +734,8 @@ impl TcpStream {
         send.nxt += send_bytes_length as u32;
         // Recalculate bytes_to_send
         bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
+        drop(send);
+        // thread::sleep(Duration::from_millis(100));
       }
     }
   }
@@ -745,6 +744,10 @@ impl TcpStream {
     // Retransmissions handler
     // Check for retransmissions
     let tcp = Arc::clone(&tcp_clone);
+    let (rto_min, rto_max) = {
+      let tcp = tcp_clone.lock().unwrap();
+      (tcp.rto_min.clone(), tcp.rto_max.clone())
+  };
     loop {
       let (rtq_lock, rtq_cv) = &*self.rtq;
       let rt_entry;
@@ -774,11 +777,11 @@ impl TcpStream {
 
       let rto;
       {
-        rto = self.rto.lock().unwrap().clone();
+        rto = std::cmp::max(self.rto_srtt.lock().unwrap().0.clone(), rto_min);
       }
       println!("time elapsed: {}", rt_entry.timestamp.elapsed().as_micros());
       println!("RTO: {}", rto);
-      if rt_entry.timestamp.elapsed().as_millis() >= rto.into() {
+      if rt_entry.timestamp.elapsed().as_micros() >= rto.into() {
         println!("782");
         for i in 0..RT_MAX {
           // Send retransmission
@@ -790,9 +793,9 @@ impl TcpStream {
           
           {
             let mut rtq = rtq_lock.lock().unwrap();
-            let mut rto = self.rto.lock().unwrap();
+            let rto = std::cmp::max(self.rto_srtt.lock().unwrap().0.clone(), rto_min);
             rtq.front_mut().unwrap().retries += 1;
-            rtq = rtq_cv.wait_timeout(rtq, Duration::from_millis(*rto * (1 << i) as u64)).unwrap().0;
+            rtq = rtq_cv.wait_timeout(rtq, Duration::from_micros(rto * (1 << i) as u64)).unwrap().0;
             let same = {
               match rtq.front() {
                 None => false,
@@ -806,7 +809,8 @@ impl TcpStream {
               break;
             }
             // Update rto with exponential backoff
-            *rto = std::cmp::min(*rto * 2, tcp.lock().unwrap().rto_max as u64);
+            let mut rto_srtt = self.rto_srtt.lock().unwrap();
+            rto_srtt.0 = std::cmp::min(rto_srtt.0 * 2, tcp.lock().unwrap().rto_max as u64);
           }
           if i == RT_MAX - 1 {
             self.status.0.lock().unwrap().status = SocketStatus::Closed;
@@ -819,7 +823,8 @@ impl TcpStream {
           }
         }
       } else {
-        // thread::sleep(Duration::from_micros(self.rto) - rt_entry.timestamp.elapsed());
+        println!("Sleeping for {:?} millis",(Duration::from_micros(rto) - rt_entry.timestamp.elapsed())/2);
+        thread::sleep((Duration::from_micros(rto) - rt_entry.timestamp.elapsed())/2);
       }
     }
   }
