@@ -735,7 +735,7 @@ impl TcpStream {
         // Recalculate bytes_to_send
         bytes_to_send = send.lbw.wrapping_sub(send.nxt).wrapping_add(1) as i64;
         drop(send);
-        // thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
       }
     }
   }
@@ -823,7 +823,7 @@ impl TcpStream {
           }
         }
       } else {
-        println!("Sleeping for {:?} millis",(Duration::from_micros(rto) - rt_entry.timestamp.elapsed())/2);
+        println!("Sleeping for {:?} micros",(Duration::from_micros(rto) - rt_entry.timestamp.elapsed())/2);
         thread::sleep((Duration::from_micros(rto) - rt_entry.timestamp.elapsed())/2);
       }
     }

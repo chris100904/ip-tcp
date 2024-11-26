@@ -1,11 +1,11 @@
 {
  "h1": {
-  "binary_path": "./vhost"
+  "binary_path": "./target/debug/vhost"
  },
  "h2": {
-  "binary_path": "./vhost"
+  "binary_path": "./reference/vhost"
  },
  "r1": {
-  "binary_path": "./vrouter"
+  "binary_path": "./reference/vrouter"
  }
 }

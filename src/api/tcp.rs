@@ -296,6 +296,7 @@ impl Tcp {
 
     // Receive a packet
     pub fn receive_packet(tcp_clone: Arc<Mutex<Tcp>>, packet: Packet) -> Result<(), TcpError> {
+      println!("299");
       let tcp_packet = TcpPacket::parse_tcp(packet.src_ip, packet.dst_ip, &packet.payload)
         .map_err(|e| TcpError::ConnectionError { message: format!("Error parsing packet. Source: {}", e) })?;
       // NOTE: src_ip and dest_ip and ports are FLIPPED because we want to check if the dest_ip is our source_ip, etc. 

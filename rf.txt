@@ -1858,4 +1858,1430 @@ Table of Contents
    bit) until the outstanding data has been acknowledged or until the
    TCP endpoint can send a full-sized segment (Eff.snd.MSS bytes).
 
-   A TCP implementation SHOULD implement the 
+   A TCP implementation SHOULD implement the Nagle algorithm to coalesce
+   short segments (SHLD-7).  However, there MUST be a way for an
+   application to disable the Nagle algorithm on an individual
+   connection (MUST-17).  In all cases, sending data is also subject to
+   the limitation imposed by the slow start algorithm [8].
+
+   Since there can be problematic interactions between the Nagle
+   algorithm and delayed acknowledgments, some implementations use minor
+   variations of the Nagle algorithm, such as the one described in
+   Appendix A.3.
+
+3.7.5.  IPv6 Jumbograms
+
+   In order to support TCP over IPv6 Jumbograms, implementations need to
+   be able to send TCP segments larger than the 64-KB limit that the MSS
+   Option can convey.  RFC 2675 [24] defines that an MSS value of 65,535
+   bytes is to be treated as infinity, and Path MTU Discovery [14] is
+   used to determine the actual MSS.
+
+   The Jumbo Payload Option need not be implemented or understood by
+   IPv6 nodes that do not support attachment to links with an MTU
+   greater than 65,575 [24], and the present IPv6 Node Requirements does
+   not include support for Jumbograms [55].
+
+3.8.  Data Communication
+
+   Once the connection is established, data is communicated by the
+   exchange of segments.  Because segments may be lost due to errors
+   (checksum test failure) or network congestion, TCP uses
+   retransmission to ensure delivery of every segment.  Duplicate
+   segments may arrive due to network or TCP retransmission.  As
+   discussed in the section on sequence numbers (Section 3.4), the TCP
+   implementation performs certain tests on the sequence and
+   acknowledgment numbers in the segments to verify their acceptability.
+
+   The sender of data keeps track of the next sequence number to use in
+   the variable SND.NXT.  The receiver of data keeps track of the next
+   sequence number to expect in the variable RCV.NXT.  The sender of
+   data keeps track of the oldest unacknowledged sequence number in the
+   variable SND.UNA.  If the data flow is momentarily idle and all data
+   sent has been acknowledged, then the three variables will be equal.
+
+   When the sender creates a segment and transmits it, the sender
+   advances SND.NXT.  When the receiver accepts a segment, it advances
+   RCV.NXT and sends an acknowledgment.  When the data sender receives
+   an acknowledgment, it advances SND.UNA.  The extent to which the
+   values of these variables differ is a measure of the delay in the
+   communication.  The amount by which the variables are advanced is the
+   length of the data and SYN or FIN flags in the segment.  Note that,
+   once in the ESTABLISHED state, all segments must carry current
+   acknowledgment information.
+
+   The CLOSE user call implies a push function (see Section 3.9.1), as
+   does the FIN control flag in an incoming segment.
+
+3.8.1.  Retransmission Timeout
+
+   Because of the variability of the networks that compose an
+   internetwork system and the wide range of uses of TCP connections,
+   the retransmission timeout (RTO) must be dynamically determined.
+
+   The RTO MUST be computed according to the algorithm in [10],
+   including Karn's algorithm for taking RTT samples (MUST-18).
+
+   RFC 793 contains an early example procedure for computing the RTO,
+   based on work mentioned in IEN 177 [71].  This was then replaced by
+   the algorithm described in RFC 1122, which was subsequently updated
+   in RFC 2988 and then again in RFC 6298.
+
+   RFC 1122 allows that if a retransmitted packet is identical to the
+   original packet (which implies not only that the data boundaries have
+   not changed, but also that none of the headers have changed), then
+   the same IPv4 Identification field MAY be used (see Section 3.2.1.5
+   of RFC 1122) (MAY-4).  The same IP Identification field may be reused
+   anyways since it is only meaningful when a datagram is fragmented
+   [44].  TCP implementations should not rely on or typically interact
+   with this IPv4 header field in any way.  It is not a reasonable way
+   to indicate duplicate sent segments nor to identify duplicate
+   received segments.
+
+3.8.2.  TCP Congestion Control
+
+   RFC 2914 [5] explains the importance of congestion control for the
+   Internet.
+
+   RFC 1122 required implementation of Van Jacobson's congestion control
+   algorithms slow start and congestion avoidance together with
+   exponential backoff for successive RTO values for the same segment.
+   RFC 2581 provided IETF Standards Track description of slow start and
+   congestion avoidance, along with fast retransmit and fast recovery.
+   RFC 5681 is the current description of these algorithms and is the
+   current Standards Track specification providing guidelines for TCP
+   congestion control.  RFC 6298 describes exponential backoff of RTO
+   values, including keeping the backed-off value until a subsequent
+   segment with new data has been sent and acknowledged without
+   retransmission.
+
+   A TCP endpoint MUST implement the basic congestion control algorithms
+   slow start, congestion avoidance, and exponential backoff of RTO to
+   avoid creating congestion collapse conditions (MUST-19).  RFC 5681
+   and RFC 6298 describe the basic algorithms on the IETF Standards
+   Track that are broadly applicable.  Multiple other suitable
+   algorithms exist and have been widely used.  Many TCP implementations
+   support a set of alternative algorithms that can be configured for
+   use on the endpoint.  An endpoint MAY implement such alternative
+   algorithms provided that the algorithms are conformant with the TCP
+   specifications from the IETF Standards Track as described in RFC
+   2914, RFC 5033 [7], and RFC 8961 [15] (MAY-18).
+
+   Explicit Congestion Notification (ECN) was defined in RFC 3168 and is
+   an IETF Standards Track enhancement that has many benefits [51].
+
+   A TCP endpoint SHOULD implement ECN as described in RFC 3168 (SHLD-
+   8).
+
+3.8.3.  TCP Connection Failures
+
+   Excessive retransmission of the same segment by a TCP endpoint
+   indicates some failure of the remote host or the internetwork path.
+   This failure may be of short or long duration.  The following
+   procedure MUST be used to handle excessive retransmissions of data
+   segments (MUST-20):
+
+   (a)  There are two thresholds R1 and R2 measuring the amount of
+        retransmission that has occurred for the same segment.  R1 and
+        R2 might be measured in time units or as a count of
+        retransmissions (with the current RTO and corresponding backoffs
+        as a conversion factor, if needed).
+
+   (b)  When the number of transmissions of the same segment reaches or
+        exceeds threshold R1, pass negative advice (see Section 3.3.1.4
+        of [19]) to the IP layer, to trigger dead-gateway diagnosis.
+
+   (c)  When the number of transmissions of the same segment reaches a
+        threshold R2 greater than R1, close the connection.
+
+   (d)  An application MUST (MUST-21) be able to set the value for R2
+        for a particular connection.  For example, an interactive
+        application might set R2 to "infinity", giving the user control
+        over when to disconnect.
+
+   (e)  TCP implementations SHOULD inform the application of the
+        delivery problem (unless such information has been disabled by
+        the application; see the "Asynchronous Reports" section
+        (Section 3.9.1.8)), when R1 is reached and before R2 (SHLD-9).
+        This will allow a remote login application program to inform the
+        user, for example.
+
+   The value of R1 SHOULD correspond to at least 3 retransmissions, at
+   the current RTO (SHLD-10).  The value of R2 SHOULD correspond to at
+   least 100 seconds (SHLD-11).
+
+   An attempt to open a TCP connection could fail with excessive
+   retransmissions of the SYN segment or by receipt of a RST segment or
+   an ICMP Port Unreachable.  SYN retransmissions MUST be handled in the
+   general way just described for data retransmissions, including
+   notification of the application layer.
+
+   However, the values of R1 and R2 may be different for SYN and data
+   segments.  In particular, R2 for a SYN segment MUST be set large
+   enough to provide retransmission of the segment for at least 3
+   minutes (MUST-23).  The application can close the connection (i.e.,
+   give up on the open attempt) sooner, of course.
+
+3.8.4.  TCP Keep-Alives
+
+   A TCP connection is said to be "idle" if for some long amount of time
+   there have been no incoming segments received and there is no new or
+   unacknowledged data to be sent.
+
+   Implementers MAY include "keep-alives" in their TCP implementations
+   (MAY-5), although this practice is not universally accepted.  Some
+   TCP implementations, however, have included a keep-alive mechanism.
+   To confirm that an idle connection is still active, these
+   implementations send a probe segment designed to elicit a response
+   from the TCP peer.  Such a segment generally contains SEG.SEQ =
+   SND.NXT-1 and may or may not contain one garbage octet of data.  If
+   keep-alives are included, the application MUST be able to turn them
+   on or off for each TCP connection (MUST-24), and they MUST default to
+   off (MUST-25).
+
+   Keep-alive packets MUST only be sent when no sent data is
+   outstanding, and no data or acknowledgment packets have been received
+   for the connection within an interval (MUST-26).  This interval MUST
+   be configurable (MUST-27) and MUST default to no less than two hours
+   (MUST-28).
+
+   It is extremely important to remember that ACK segments that contain
+   no data are not reliably transmitted by TCP.  Consequently, if a
+   keep-alive mechanism is implemented it MUST NOT interpret failure to
+   respond to any specific probe as a dead connection (MUST-29).
+
+   An implementation SHOULD send a keep-alive segment with no data
+   (SHLD-12); however, it MAY be configurable to send a keep-alive
+   segment containing one garbage octet (MAY-6), for compatibility with
+   erroneous TCP implementations.
+
+3.8.5.  The Communication of Urgent Information
+
+   As a result of implementation differences and middlebox interactions,
+   new applications SHOULD NOT employ the TCP urgent mechanism (SHLD-
+   13).  However, TCP implementations MUST still include support for the
+   urgent mechanism (MUST-30).  Information on how some TCP
+   implementations interpret the urgent pointer can be found in RFC 6093
+   [39].
+
+   The objective of the TCP urgent mechanism is to allow the sending
+   user to stimulate the receiving user to accept some urgent data and
+   to permit the receiving TCP endpoint to indicate to the receiving
+   user when all the currently known urgent data has been received by
+   the user.
+
+   This mechanism permits a point in the data stream to be designated as
+   the end of urgent information.  Whenever this point is in advance of
+   the receive sequence number (RCV.NXT) at the receiving TCP endpoint,
+   then the TCP implementation must tell the user to go into "urgent
+   mode"; when the receive sequence number catches up to the urgent
+   pointer, the TCP implementation must tell user to go into "normal
+   mode".  If the urgent pointer is updated while the user is in "urgent
+   mode", the update will be invisible to the user.
+
+   The method employs an urgent field that is carried in all segments
+   transmitted.  The URG control flag indicates that the urgent field is
+   meaningful and must be added to the segment sequence number to yield
+   the urgent pointer.  The absence of this flag indicates that there is
+   no urgent data outstanding.
+
+   To send an urgent indication, the user must also send at least one
+   data octet.  If the sending user also indicates a push, timely
+   delivery of the urgent information to the destination process is
+   enhanced.  Note that because changes in the urgent pointer correspond
+   to data being written by a sending application, the urgent pointer
+   cannot "recede" in the sequence space, but a TCP receiver should be
+   robust to invalid urgent pointer values.
+
+   A TCP implementation MUST support a sequence of urgent data of any
+   length (MUST-31) [19].
+
+   The urgent pointer MUST point to the sequence number of the octet
+   following the urgent data (MUST-62).
+
+   A TCP implementation MUST (MUST-32) inform the application layer
+   asynchronously whenever it receives an urgent pointer and there was
+   previously no pending urgent data, or whenever the urgent pointer
+   advances in the data stream.  The TCP implementation MUST (MUST-33)
+   provide a way for the application to learn how much urgent data
+   remains to be read from the connection, or at least to determine
+   whether more urgent data remains to be read [19].
+
+3.8.6.  Managing the Window
+
+   The window sent in each segment indicates the range of sequence
+   numbers the sender of the window (the data receiver) is currently
+   prepared to accept.  There is an assumption that this is related to
+   the data buffer space currently available for this connection.
+
+   The sending TCP endpoint packages the data to be transmitted into
+   segments that fit the current window, and may repackage segments on
+   the retransmission queue.  Such repackaging is not required but may
+   be helpful.
+
+   In a connection with a one-way data flow, the window information will
+   be carried in acknowledgment segments that all have the same sequence
+   number, so there will be no way to reorder them if they arrive out of
+   order.  This is not a serious problem, but it will allow the window
+   information to be on occasion temporarily based on old reports from
+   the data receiver.  A refinement to avoid this problem is to act on
+   the window information from segments that carry the highest
+   acknowledgment number (that is, segments with an acknowledgment
+   number equal to or greater than the highest previously received).
+
+   Indicating a large window encourages transmissions.  If more data
+   arrives than can be accepted, it will be discarded.  This will result
+   in excessive retransmissions, adding unnecessarily to the load on the
+   network and the TCP endpoints.  Indicating a small window may
+   restrict the transmission of data to the point of introducing a
+   round-trip delay between each new segment transmitted.
+
+   The mechanisms provided allow a TCP endpoint to advertise a large
+   window and to subsequently advertise a much smaller window without
+   having accepted that much data.  This so-called "shrinking the
+   window" is strongly discouraged.  The robustness principle [19]
+   dictates that TCP peers will not shrink the window themselves, but
+   will be prepared for such behavior on the part of other TCP peers.
+
+   A TCP receiver SHOULD NOT shrink the window, i.e., move the right
+   window edge to the left (SHLD-14).  However, a sending TCP peer MUST
+   be robust against window shrinking, which may cause the "usable
+   window" (see Section 3.8.6.2.1) to become negative (MUST-34).
+
+   If this happens, the sender SHOULD NOT send new data (SHLD-15), but
+   SHOULD retransmit normally the old unacknowledged data between
+   SND.UNA and SND.UNA+SND.WND (SHLD-16).  The sender MAY also
+   retransmit old data beyond SND.UNA+SND.WND (MAY-7), but SHOULD NOT
+   time out the connection if data beyond the right window edge is not
+   acknowledged (SHLD-17).  If the window shrinks to zero, the TCP
+   implementation MUST probe it in the standard way (described below)
+   (MUST-35).
+
+3.8.6.1.  Zero-Window Probing
+
+   The sending TCP peer must regularly transmit at least one octet of
+   new data (if available), or retransmit to the receiving TCP peer even
+   if the send window is zero, in order to "probe" the window.  This
+   retransmission is essential to guarantee that when either TCP peer
+   has a zero window the reopening of the window will be reliably
+   reported to the other.  This is referred to as Zero-Window Probing
+   (ZWP) in other documents.
+
+   Probing of zero (offered) windows MUST be supported (MUST-36).
+
+   A TCP implementation MAY keep its offered receive window closed
+   indefinitely (MAY-8).  As long as the receiving TCP peer continues to
+   send acknowledgments in response to the probe segments, the sending
+   TCP peer MUST allow the connection to stay open (MUST-37).  This
+   enables TCP to function in scenarios such as the "printer ran out of
+   paper" situation described in Section 4.2.2.17 of [19].  The behavior
+   is subject to the implementation's resource management concerns, as
+   noted in [41].
+
+   When the receiving TCP peer has a zero window and a segment arrives,
+   it must still send an acknowledgment showing its next expected
+   sequence number and current window (zero).
+
+   The transmitting host SHOULD send the first zero-window probe when a
+   zero window has existed for the retransmission timeout period (SHLD-
+   29) (Section 3.8.1), and SHOULD increase exponentially the interval
+   between successive probes (SHLD-30).
+
+3.8.6.2.  Silly Window Syndrome Avoidance
+
+   The "Silly Window Syndrome" (SWS) is a stable pattern of small
+   incremental window movements resulting in extremely poor TCP
+   performance.  Algorithms to avoid SWS are described below for both
+   the sending side and the receiving side.  RFC 1122 contains more
+   detailed discussion of the SWS problem.  Note that the Nagle
+   algorithm and the sender SWS avoidance algorithm play complementary
+   roles in improving performance.  The Nagle algorithm discourages
+   sending tiny segments when the data to be sent increases in small
+   increments, while the SWS avoidance algorithm discourages small
+   segments resulting from the right window edge advancing in small
+   increments.
+
+3.8.6.2.1.  Sender's Algorithm -- When to Send Data
+
+   A TCP implementation MUST include a SWS avoidance algorithm in the
+   sender (MUST-38).
+
+   The Nagle algorithm from Section 3.7.4 additionally describes how to
+   coalesce short segments.
+
+   The sender's SWS avoidance algorithm is more difficult than the
+   receiver's because the sender does not know (directly) the receiver's
+   total buffer space (RCV.BUFF).  An approach that has been found to
+   work well is for the sender to calculate Max(SND.WND), which is the
+   maximum send window it has seen so far on the connection, and to use
+   this value as an estimate of RCV.BUFF.  Unfortunately, this can only
+   be an estimate; the receiver may at any time reduce the size of
+   RCV.BUFF.  To avoid a resulting deadlock, it is necessary to have a
+   timeout to force transmission of data, overriding the SWS avoidance
+   algorithm.  In practice, this timeout should seldom occur.
+
+   The "usable window" is:
+
+      U = SND.UNA + SND.WND - SND.NXT
+
+   i.e., the offered window less the amount of data sent but not
+   acknowledged.  If D is the amount of data queued in the sending TCP
+   endpoint but not yet sent, then the following set of rules is
+   recommended.
+
+   Send data:
+
+   (1)  if a maximum-sized segment can be sent, i.e., if:
+
+           min(D,U) >= Eff.snd.MSS;
+
+   (2)  or if the data is pushed and all queued data can be sent now,
+        i.e., if:
+
+           [SND.NXT = SND.UNA and] PUSHed and D <= U
+
+        (the bracketed condition is imposed by the Nagle algorithm);
+
+   (3)  or if at least a fraction Fs of the maximum window can be sent,
+        i.e., if:
+
+           [SND.NXT = SND.UNA and]
+
+              min(D,U) >= Fs * Max(SND.WND);
+
+   (4)  or if the override timeout occurs.
+
+   Here Fs is a fraction whose recommended value is 1/2.  The override
+   timeout should be in the range 0.1 - 1.0 seconds.  It may be
+   convenient to combine this timer with the timer used to probe zero
+   windows (Section 3.8.6.1).
+
+3.8.6.2.2.  Receiver's Algorithm -- When to Send a Window Update
+
+   A TCP implementation MUST include a SWS avoidance algorithm in the
+   receiver (MUST-39).
+
+   The receiver's SWS avoidance algorithm determines when the right
+   window edge may be advanced; this is customarily known as "updating
+   the window".  This algorithm combines with the delayed ACK algorithm
+   (Section 3.8.6.3) to determine when an ACK segment containing the
+   current window will really be sent to the receiver.
+
+   The solution to receiver SWS is to avoid advancing the right window
+   edge RCV.NXT+RCV.WND in small increments, even if data is received
+   from the network in small segments.
+
+   Suppose the total receive buffer space is RCV.BUFF.  At any given
+   moment, RCV.USER octets of this total may be tied up with data that
+   has been received and acknowledged but that the user process has not
+   yet consumed.  When the connection is quiescent, RCV.WND = RCV.BUFF
+   and RCV.USER = 0.
+
+   Keeping the right window edge fixed as data arrives and is
+   acknowledged requires that the receiver offer less than its full
+   buffer space, i.e., the receiver must specify a RCV.WND that keeps
+   RCV.NXT+RCV.WND constant as RCV.NXT increases.  Thus, the total
+   buffer space RCV.BUFF is generally divided into three parts:
+
+                  |<------- RCV.BUFF ---------------->|
+                       1             2            3
+              ----|---------|------------------|------|----
+                         RCV.NXT               ^
+                                            (Fixed)
+
+              1 - RCV.USER =  data received but not yet consumed;
+              2 - RCV.WND =   space advertised to sender;
+              3 - Reduction = space available but not yet
+                              advertised.
+
+   The suggested SWS avoidance algorithm for the receiver is to keep
+   RCV.NXT+RCV.WND fixed until the reduction satisfies:
+
+                RCV.BUFF - RCV.USER - RCV.WND  >=
+
+                       min( Fr * RCV.BUFF, Eff.snd.MSS )
+
+   where Fr is a fraction whose recommended value is 1/2, and
+   Eff.snd.MSS is the effective send MSS for the connection (see
+   Section 3.7.1).  When the inequality is satisfied, RCV.WND is set to
+   RCV.BUFF-RCV.USER.
+
+   Note that the general effect of this algorithm is to advance RCV.WND
+   in increments of Eff.snd.MSS (for realistic receive buffers:
+   Eff.snd.MSS < RCV.BUFF/2).  Note also that the receiver must use its
+   own Eff.snd.MSS, making the assumption that it is the same as the
+   sender's.
+
+3.8.6.3.  Delayed Acknowledgments -- When to Send an ACK Segment
+
+   A host that is receiving a stream of TCP data segments can increase
+   efficiency in both the network and the hosts by sending fewer than
+   one ACK (acknowledgment) segment per data segment received; this is
+   known as a "delayed ACK".
+
+   A TCP endpoint SHOULD implement a delayed ACK (SHLD-18), but an ACK
+   should not be excessively delayed; in particular, the delay MUST be
+   less than 0.5 seconds (MUST-40).  An ACK SHOULD be generated for at
+   least every second full-sized segment or 2*RMSS bytes of new data
+   (where RMSS is the MSS specified by the TCP endpoint receiving the
+   segments to be acknowledged, or the default value if not specified)
+   (SHLD-19).  Excessive delays on ACKs can disturb the round-trip
+   timing and packet "clocking" algorithms.  More complete discussion of
+   delayed ACK behavior is in Section 4.2 of RFC 5681 [8], including
+   recommendations to immediately acknowledge out-of-order segments,
+   segments above a gap in sequence space, or segments that fill all or
+   part of a gap, in order to accelerate loss recovery.
+
+   Note that there are several current practices that further lead to a
+   reduced number of ACKs, including generic receive offload (GRO) [72],
+   ACK compression, and ACK decimation [28].
+
+3.9.  Interfaces
+
+   There are of course two interfaces of concern: the user/TCP interface
+   and the TCP/lower-level interface.  We have a fairly elaborate model
+   of the user/TCP interface, but the interface to the lower-level
+   protocol module is left unspecified here since it will be specified
+   in detail by the specification of the lower-level protocol.  For the
+   case that the lower level is IP, we note some of the parameter values
+   that TCP implementations might use.
+
+3.9.1.  User/TCP Interface
+
+   The following functional description of user commands to the TCP
+   implementation is, at best, fictional, since every operating system
+   will have different facilities.  Consequently, we must warn readers
+   that different TCP implementations may have different user
+   interfaces.  However, all TCP implementations must provide a certain
+   minimum set of services to guarantee that all TCP implementations can
+   support the same protocol hierarchy.  This section specifies the
+   functional interfaces required of all TCP implementations.
+
+   Section 3.1 of [53] also identifies primitives provided by TCP and
+   could be used as an additional reference for implementers.
+
+   The following sections functionally characterize a user/TCP
+   interface.  The notation used is similar to most procedure or
+   function calls in high-level languages, but this usage is not meant
+   to rule out trap-type service calls.
+
+   The user commands described below specify the basic functions the TCP
+   implementation must perform to support interprocess communication.
+   Individual implementations must define their own exact format and may
+   provide combinations or subsets of the basic functions in single
+   calls.  In particular, some implementations may wish to automatically
+   OPEN a connection on the first SEND or RECEIVE issued by the user for
+   a given connection.
+
+   In providing interprocess communication facilities, the TCP
+   implementation must not only accept commands, but must also return
+   information to the processes it serves.  The latter consists of:
+
+   (a)  general information about a connection (e.g., interrupts, remote
+        close, binding of unspecified remote socket).
+
+   (b)  replies to specific user commands indicating success or various
+        types of failure.
+
+3.9.1.1.  Open
+
+   Format: OPEN (local port, remote socket, active/passive [, timeout]
+   [, Diffserv field] [, security/compartment] [, local IP address] [,
+   options]) -> local connection name
+
+   If the active/passive flag is set to passive, then this is a call to
+   LISTEN for an incoming connection.  A passive OPEN may have either a
+   fully specified remote socket to wait for a particular connection or
+   an unspecified remote socket to wait for any call.  A fully specified
+   passive call can be made active by the subsequent execution of a
+   SEND.
+
+   A transmission control block (TCB) is created and partially filled in
+   with data from the OPEN command parameters.
+
+   Every passive OPEN call either creates a new connection record in
+   LISTEN state, or it returns an error; it MUST NOT affect any
+   previously created connection record (MUST-41).
+
+   A TCP implementation that supports multiple concurrent connections
+   MUST provide an OPEN call that will functionally allow an application
+   to LISTEN on a port while a connection block with the same local port
+   is in SYN-SENT or SYN-RECEIVED state (MUST-42).
+
+   On an active OPEN command, the TCP endpoint will begin the procedure
+   to synchronize (i.e., establish) the connection at once.
+
+   The timeout, if present, permits the caller to set up a timeout for
+   all data submitted to TCP.  If data is not successfully delivered to
+   the destination within the timeout period, the TCP endpoint will
+   abort the connection.  The present global default is five minutes.
+
+   The TCP implementation or some component of the operating system will
+   verify the user's authority to open a connection with the specified
+   Diffserv field value or security/compartment.  The absence of a
+   Diffserv field value or security/compartment specification in the
+   OPEN call indicates the default values must be used.
+
+   TCP will accept incoming requests as matching only if the security/
+   compartment information is exactly the same as that requested in the
+   OPEN call.
+
+   The Diffserv field value indicated by the user only impacts outgoing
+   packets, may be altered en route through the network, and has no
+   direct bearing or relation to received packets.
+
+   A local connection name will be returned to the user by the TCP
+   implementation.  The local connection name can then be used as a
+   shorthand term for the connection defined by the <local socket,
+   remote socket> pair.
+
+   The optional "local IP address" parameter MUST be supported to allow
+   the specification of the local IP address (MUST-43).  This enables
+   applications that need to select the local IP address used when
+   multihoming is present.
+
+   A passive OPEN call with a specified "local IP address" parameter
+   will await an incoming connection request to that address.  If the
+   parameter is unspecified, a passive OPEN will await an incoming
+   connection request to any local IP address and then bind the local IP
+   address of the connection to the particular address that is used.
+
+   For an active OPEN call, a specified "local IP address" parameter
+   will be used for opening the connection.  If the parameter is
+   unspecified, the host will choose an appropriate local IP address
+   (see RFC 1122, Section 3.3.4.2).
+
+   If an application on a multihomed host does not specify the local IP
+   address when actively opening a TCP connection, then the TCP
+   implementation MUST ask the IP layer to select a local IP address
+   before sending the (first) SYN (MUST-44).  See the function
+   GET_SRCADDR() in Section 3.4 of RFC 1122.
+
+   At all other times, a previous segment has either been sent or
+   received on this connection, and TCP implementations MUST use the
+   same local address that was used in those previous segments (MUST-
+   45).
+
+   A TCP implementation MUST reject as an error a local OPEN call for an
+   invalid remote IP address (e.g., a broadcast or multicast address)
+   (MUST-46).
+
+3.9.1.2.  Send
+
+   Format: SEND (local connection name, buffer address, byte count,
+   URGENT flag [, PUSH flag] [, timeout])
+
+   This call causes the data contained in the indicated user buffer to
+   be sent on the indicated connection.  If the connection has not been
+   opened, the SEND is considered an error.  Some implementations may
+   allow users to SEND first; in which case, an automatic OPEN would be
+   done.  For example, this might be one way for application data to be
+   included in SYN segments.  If the calling process is not authorized
+   to use this connection, an error is returned.
+
+   A TCP endpoint MAY implement PUSH flags on SEND calls (MAY-15).  If
+   PUSH flags are not implemented, then the sending TCP peer: (1) MUST
+   NOT buffer data indefinitely (MUST-60), and (2) MUST set the PSH bit
+   in the last buffered segment (i.e., when there is no more queued data
+   to be sent) (MUST-61).  The remaining description below assumes the
+   PUSH flag is supported on SEND calls.
+
+   If the PUSH flag is set, the application intends the data to be
+   transmitted promptly to the receiver, and the PSH bit will be set in
+   the last TCP segment created from the buffer.
+
+   The PSH bit is not a record marker and is independent of segment
+   boundaries.  The transmitter SHOULD collapse successive bits when it
+   packetizes data, to send the largest possible segment (SHLD-27).
+
+   If the PUSH flag is not set, the data may be combined with data from
+   subsequent SENDs for transmission efficiency.  When an application
+   issues a series of SEND calls without setting the PUSH flag, the TCP
+   implementation MAY aggregate the data internally without sending it
+   (MAY-16).  Note that when the Nagle algorithm is in use, TCP
+   implementations may buffer the data before sending, without regard to
+   the PUSH flag (see Section 3.7.4).
+
+   An application program is logically required to set the PUSH flag in
+   a SEND call whenever it needs to force delivery of the data to avoid
+   a communication deadlock.  However, a TCP implementation SHOULD send
+   a maximum-sized segment whenever possible (SHLD-28) to improve
+   performance (see Section 3.8.6.2.1).
+
+   New applications SHOULD NOT set the URGENT flag [39] due to
+   implementation differences and middlebox issues (SHLD-13).
+
+   If the URGENT flag is set, segments sent to the destination TCP peer
+   will have the urgent pointer set.  The receiving TCP peer will signal
+   the urgent condition to the receiving process if the urgent pointer
+   indicates that data preceding the urgent pointer has not been
+   consumed by the receiving process.  The purpose of the URGENT flag is
+   to stimulate the receiver to process the urgent data and to indicate
+   to the receiver when all the currently known urgent data has been
+   received.  The number of times the sending user's TCP implementation
+   signals urgent will not necessarily be equal to the number of times
+   the receiving user will be notified of the presence of urgent data.
+
+   If no remote socket was specified in the OPEN, but the connection is
+   established (e.g., because a LISTENing connection has become specific
+   due to a remote segment arriving for the local socket), then the
+   designated buffer is sent to the implied remote socket.  Users who
+   make use of OPEN with an unspecified remote socket can make use of
+   SEND without ever explicitly knowing the remote socket address.
+
+   However, if a SEND is attempted before the remote socket becomes
+   specified, an error will be returned.  Users can use the STATUS call
+   to determine the status of the connection.  Some TCP implementations
+   may notify the user when an unspecified socket is bound.
+
+   If a timeout is specified, the current user timeout for this
+   connection is changed to the new one.
+
+   In the simplest implementation, SEND would not return control to the
+   sending process until either the transmission was complete or the
+   timeout had been exceeded.  However, this simple method is both
+   subject to deadlocks (for example, both sides of the connection might
+   try to do SENDs before doing any RECEIVEs) and offers poor
+   performance, so it is not recommended.  A more sophisticated
+   implementation would return immediately to allow the process to run
+   concurrently with network I/O, and, furthermore, to allow multiple
+   SENDs to be in progress.  Multiple SENDs are served in first come,
+   first served order, so the TCP endpoint will queue those it cannot
+   service immediately.
+
+   We have implicitly assumed an asynchronous user interface in which a
+   SEND later elicits some kind of SIGNAL or pseudo-interrupt from the
+   serving TCP endpoint.  An alternative is to return a response
+   immediately.  For instance, SENDs might return immediate local
+   acknowledgment, even if the segment sent had not been acknowledged by
+   the distant TCP endpoint.  We could optimistically assume eventual
+   success.  If we are wrong, the connection will close anyway due to
+   the timeout.  In implementations of this kind (synchronous), there
+   will still be some asynchronous signals, but these will deal with the
+   connection itself, and not with specific segments or buffers.
+
+   In order for the process to distinguish among error or success
+   indications for different SENDs, it might be appropriate for the
+   buffer address to be returned along with the coded response to the
+   SEND request.  TCP-to-user signals are discussed below, indicating
+   the information that should be returned to the calling process.
+
+3.9.1.3.  Receive
+
+   Format: RECEIVE (local connection name, buffer address, byte count)
+   -> byte count, URGENT flag [, PUSH flag]
+
+   This command allocates a receiving buffer associated with the
+   specified connection.  If no OPEN precedes this command or the
+   calling process is not authorized to use this connection, an error is
+   returned.
+
+   In the simplest implementation, control would not return to the
+   calling program until either the buffer was filled or some error
+   occurred, but this scheme is highly subject to deadlocks.  A more
+   sophisticated implementation would permit several RECEIVEs to be
+   outstanding at once.  These would be filled as segments arrive.  This
+   strategy permits increased throughput at the cost of a more elaborate
+   scheme (possibly asynchronous) to notify the calling program that a
+   PUSH has been seen or a buffer filled.
+
+   A TCP receiver MAY pass a received PSH bit to the application layer
+   via the PUSH flag in the interface (MAY-17), but it is not required
+   (this was clarified in RFC 1122, Section 4.2.2.2).  The remainder of
+   text describing the RECEIVE call below assumes that passing the PUSH
+   indication is supported.
+
+   If enough data arrive to fill the buffer before a PUSH is seen, the
+   PUSH flag will not be set in the response to the RECEIVE.  The buffer
+   will be filled with as much data as it can hold.  If a PUSH is seen
+   before the buffer is filled, the buffer will be returned partially
+   filled and PUSH indicated.
+
+   If there is urgent data, the user will have been informed as soon as
+   it arrived via a TCP-to-user signal.  The receiving user should thus
+   be in "urgent mode".  If the URGENT flag is on, additional urgent
+   data remains.  If the URGENT flag is off, this call to RECEIVE has
+   returned all the urgent data, and the user may now leave "urgent
+   mode".  Note that data following the urgent pointer (non-urgent data)
+   cannot be delivered to the user in the same buffer with preceding
+   urgent data unless the boundary is clearly marked for the user.
+
+   To distinguish among several outstanding RECEIVEs and to take care of
+   the case that a buffer is not completely filled, the return code is
+   accompanied by both a buffer pointer and a byte count indicating the
+   actual length of the data received.
+
+   Alternative implementations of RECEIVE might have the TCP endpoint
+   allocate buffer storage, or the TCP endpoint might share a ring
+   buffer with the user.
+
+3.9.1.4.  Close
+
+   Format: CLOSE (local connection name)
+
+   This command causes the connection specified to be closed.  If the
+   connection is not open or the calling process is not authorized to
+   use this connection, an error is returned.  Closing connections is
+   intended to be a graceful operation in the sense that outstanding
+   SENDs will be transmitted (and retransmitted), as flow control
+   permits, until all have been serviced.  Thus, it should be acceptable
+   to make several SEND calls, followed by a CLOSE, and expect all the
+   data to be sent to the destination.  It should also be clear that
+   users should continue to RECEIVE on CLOSING connections since the
+   remote peer may be trying to transmit the last of its data.  Thus,
+   CLOSE means "I have no more to send" but does not mean "I will not
+   receive any more."  It may happen (if the user-level protocol is not
+   well thought out) that the closing side is unable to get rid of all
+   its data before timing out.  In this event, CLOSE turns into ABORT,
+   and the closing TCP peer gives up.
+
+   The user may CLOSE the connection at any time on their own
+   initiative, or in response to various prompts from the TCP
+   implementation (e.g., remote close executed, transmission timeout
+   exceeded, destination inaccessible).
+
+   Because closing a connection requires communication with the remote
+   TCP peer, connections may remain in the closing state for a short
+   time.  Attempts to reopen the connection before the TCP peer replies
+   to the CLOSE command will result in error responses.
+
+   Close also implies push function.
+
+3.9.1.5.  Status
+
+   Format: STATUS (local connection name) -> status data
+
+   This is an implementation-dependent user command and could be
+   excluded without adverse effect.  Information returned would
+   typically come from the TCB associated with the connection.
+
+   This command returns a data block containing the following
+   information:
+
+      local socket,
+
+      remote socket,
+
+      local connection name,
+
+      receive window,
+
+      send window,
+
+      connection state,
+
+      number of buffers awaiting acknowledgment,
+
+      number of buffers pending receipt,
+
+      urgent state,
+
+      Diffserv field value,
+
+      security/compartment, and
+
+      transmission timeout.
+
+   Depending on the state of the connection, or on the implementation
+   itself, some of this information may not be available or meaningful.
+   If the calling process is not authorized to use this connection, an
+   error is returned.  This prevents unauthorized processes from gaining
+   information about a connection.
+
+3.9.1.6.  Abort
+
+   Format: ABORT (local connection name)
+
+   This command causes all pending SENDs and RECEIVES to be aborted, the
+   TCB to be removed, and a special RST message to be sent to the remote
+   TCP peer of the connection.  Depending on the implementation, users
+   may receive abort indications for each outstanding SEND or RECEIVE,
+   or may simply receive an ABORT-acknowledgment.
+
+3.9.1.7.  Flush
+
+   Some TCP implementations have included a FLUSH call, which will empty
+   the TCP send queue of any data that the user has issued SEND calls
+   for but is still to the right of the current send window.  That is,
+   it flushes as much queued send data as possible without losing
+   sequence number synchronization.  The FLUSH call MAY be implemented
+   (MAY-14).
+
+3.9.1.8.  Asynchronous Reports
+
+   There MUST be a mechanism for reporting soft TCP error conditions to
+   the application (MUST-47).  Generically, we assume this takes the
+   form of an application-supplied ERROR_REPORT routine that may be
+   upcalled asynchronously from the transport layer:
+
+      ERROR_REPORT(local connection name, reason, subreason)
+
+   The precise encoding of the reason and subreason parameters is not
+   specified here.  However, the conditions that are reported
+   asynchronously to the application MUST include:
+
+   *  ICMP error message arrived (see Section 3.9.2.2 for description of
+      handling each ICMP message type since some message types need to
+      be suppressed from generating reports to the application)
+
+   *  Excessive retransmissions (see Section 3.8.3)
+
+   *  Urgent pointer advance (see Section 3.8.5)
+
+   However, an application program that does not want to receive such
+   ERROR_REPORT calls SHOULD be able to effectively disable these calls
+   (SHLD-20).
+
+3.9.1.9.  Set Differentiated Services Field (IPv4 TOS or IPv6 Traffic
+          Class)
+
+   The application layer MUST be able to specify the Differentiated
+   Services field for segments that are sent on a connection (MUST-48).
+   The Differentiated Services field includes the 6-bit Differentiated
+   Services Codepoint (DSCP) value.  It is not required, but the
+   application SHOULD be able to change the Differentiated Services
+   field during the connection lifetime (SHLD-21).  TCP implementations
+   SHOULD pass the current Differentiated Services field value without
+   change to the IP layer, when it sends segments on the connection
+   (SHLD-22).
+
+   The Differentiated Services field will be specified independently in
+   each direction on the connection, so that the receiver application
+   will specify the Differentiated Services field used for ACK segments.
+
+   TCP implementations MAY pass the most recently received
+   Differentiated Services field up to the application (MAY-9).
+
+3.9.2.  TCP/Lower-Level Interface
+
+   The TCP endpoint calls on a lower-level protocol module to actually
+   send and receive information over a network.  The two current
+   standard Internet Protocol (IP) versions layered below TCP are IPv4
+   [1] and IPv6 [13].
+
+   If the lower-level protocol is IPv4, it provides arguments for a type
+   of service (used within the Differentiated Services field) and for a
+   time to live.  TCP uses the following settings for these parameters:
+
+   Diffserv field:  The IP header value for the Diffserv field is given
+      by the user.  This includes the bits of the Diffserv Codepoint
+      (DSCP).
+
+   Time to Live (TTL):  The TTL value used to send TCP segments MUST be
+      configurable (MUST-49).
+
+      *  Note that RFC 793 specified one minute (60 seconds) as a
+         constant for the TTL because the assumed maximum segment
+         lifetime was two minutes.  This was intended to explicitly ask
+         that a segment be destroyed if it could not be delivered by the
+         internet system within one minute.  RFC 1122 updated RFC 793 to
+         require that the TTL be configurable.
+
+      *  Note that the Diffserv field is permitted to change during a
+         connection (Section 4.2.4.2 of RFC 1122).  However, the
+         application interface might not support this ability, and the
+         application does not have knowledge about individual TCP
+         segments, so this can only be done on a coarse granularity, at
+         best.  This limitation is further discussed in RFC 7657
+         (Sections 5.1, 5.3, and 6) [50].  Generally, an application
+         SHOULD NOT change the Diffserv field value during the course of
+         a connection (SHLD-23).
+
+   Any lower-level protocol will have to provide the source address,
+   destination address, and protocol fields, and some way to determine
+   the "TCP length", both to provide the functional equivalent service
+   of IP and to be used in the TCP checksum.
+
+   When received options are passed up to TCP from the IP layer, a TCP
+   implementation MUST ignore options that it does not understand (MUST-
+   50).
+
+   A TCP implementation MAY support the Timestamp (MAY-10) and Record
+   Route (MAY-11) Options.
+
+3.9.2.1.  Source Routing
+
+   If the lower level is IP (or other protocol that provides this
+   feature) and source routing is used, the interface must allow the
+   route information to be communicated.  This is especially important
+   so that the source and destination addresses used in the TCP checksum
+   be the originating source and ultimate destination.  It is also
+   important to preserve the return route to answer connection requests.
+
+   An application MUST be able to specify a source route when it
+   actively opens a TCP connection (MUST-51), and this MUST take
+   precedence over a source route received in a datagram (MUST-52).
+
+   When a TCP connection is OPENed passively and a packet arrives with a
+   completed IP Source Route Option (containing a return route), TCP
+   implementations MUST save the return route and use it for all
+   segments sent on this connection (MUST-53).  If a different source
+   route arrives in a later segment, the later definition SHOULD
+   override the earlier one (SHLD-24).
+
+3.9.2.2.  ICMP Messages
+
+   TCP implementations MUST act on an ICMP error message passed up from
+   the IP layer, directing it to the connection that created the error
+   (MUST-54).  The necessary demultiplexing information can be found in
+   the IP header contained within the ICMP message.
+
+   This applies to ICMPv6 in addition to IPv4 ICMP.
+
+   [35] contains discussion of specific ICMP and ICMPv6 messages
+   classified as either "soft" or "hard" errors that may bear different
+   responses.  Treatment for classes of ICMP messages is described
+   below:
+
+   Source Quench
+     TCP implementations MUST silently discard any received ICMP Source
+     Quench messages (MUST-55).  See [11] for discussion.
+
+   Soft Errors
+     For IPv4 ICMP, these include: Destination Unreachable -- codes 0,
+     1, 5; Time Exceeded -- codes 0, 1; and Parameter Problem.
+
+     For ICMPv6, these include: Destination Unreachable -- codes 0, 3;
+     Time Exceeded -- codes 0, 1; and Parameter Problem -- codes 0, 1,
+     2.
+
+     Since these Unreachable messages indicate soft error conditions, a
+     TCP implementation MUST NOT abort the connection (MUST-56), and it
+     SHOULD make the information available to the application (SHLD-25).
+
+   Hard Errors
+     For ICMP these include Destination Unreachable -- codes 2-4.
+
+     These are hard error conditions, so TCP implementations SHOULD
+     abort the connection (SHLD-26).  [35] notes that some
+     implementations do not abort connections when an ICMP hard error is
+     received for a connection that is in any of the synchronized
+     states.
+
+   Note that [35], Section 4 describes widespread implementation
+   behavior that treats soft errors as hard errors during connection
+   establishment.
+
+3.9.2.3.  Source Address Validation
+
+   RFC 1122 requires addresses to be validated in incoming SYN packets:
+
+   |  An incoming SYN with an invalid source address MUST be ignored
+   |  either by TCP or by the IP layer [(MUST-63)] (see
+   |  Section 3.2.1.3).
+   |  
+   |  A TCP implementation MUST silently discard an incoming SYN segment
+   |  that is addressed to a broadcast or multicast address [(MUST-57)].
+
+   This prevents connection state and replies from being erroneously
+   generated, and implementers should note that this guidance is
+   applicable to all incoming segments, not just SYNs, as specifically
+   indicated in RFC 1122.
+
+3.10.  Event Processing
+
+   The processing depicted in this section is an example of one possible
+   implementation.  Other implementations may have slightly different
+   processing sequences, but they should differ from those in this
+   section only in detail, not in substance.
+
+   The activity of the TCP endpoint can be characterized as responding
+   to events.  The events that occur can be cast into three categories:
+   user calls, arriving segments, and timeouts.  This section describes
+   the processing the TCP endpoint does in response to each of the
+   events.  In many cases, the processing required depends on the state
+   of the connection.
+
+   Events that occur:
+
+      User Calls
+
+         OPEN
+
+         SEND
+
+         RECEIVE
+
+         CLOSE
+
+         ABORT
+
+         STATUS
+
+      Arriving Segments
+
+         SEGMENT ARRIVES
+
+      Timeouts
+
+         USER TIMEOUT
+
+         RETRANSMISSION TIMEOUT
+
+         TIME-WAIT TIMEOUT
+
+   The model of the TCP/user interface is that user commands receive an
+   immediate return and possibly a delayed response via an event or
+   pseudo-interrupt.  In the following descriptions, the term "signal"
+   means cause a delayed response.
+
+   Error responses in this document are identified by character strings.
+   For example, user commands referencing connections that do not exist
+   receive "error: connection not open".
+
+   Please note in the following that all arithmetic on sequence numbers,
+   acknowledgment numbers, windows, et cetera, is modulo 2^32 (the size
+   of the sequence number space).  Also note that "=<" means less than
+   or equal to (modulo 2^32).
+
+   A natural way to think about processing incoming segments is to
+   imagine that they are first tested for proper sequence number (i.e.,
+   that their contents lie in the range of the expected "receive window"
+   in the sequence number space) and then that they are generally queued
+   and processed in sequence number order.
+
+   When a segment overlaps other already received segments, we
+   reconstruct the segment to contain just the new data and adjust the
+   header fields to be consistent.
+
+   Note that if no state change is mentioned, the TCP connection stays
+   in the same state.
+
+3.10.1.  OPEN Call
+
+   CLOSED STATE (i.e., TCB does not exist)
+
+   *  Create a new transmission control block (TCB) to hold connection
+      state information.  Fill in local socket identifier, remote
+      socket, Diffserv field, security/compartment, and user timeout
+      information.  Note that some parts of the remote socket may be
+      unspecified in a passive OPEN and are to be filled in by the
+      parameters of the incoming SYN segment.  Verify the security and
+      Diffserv value requested are allowed for this user, if not, return
+      "error: Diffserv value not allowed" or "error: security/
+      compartment not allowed".  If passive, enter the LISTEN state and
+      return.  If active and the remote socket is unspecified, return
+      "error: remote socket unspecified"; if active and the remote
+      socket is specified, issue a SYN segment.  An initial send
+      sequence number (ISS) is selected.  A SYN segment of the form
+      <SEQ=ISS><CTL=SYN> is sent.  Set SND.UNA to ISS, SND.NXT to ISS+1,
+      enter SYN-SENT state, and return.
+
+   *  If the caller does not have access to the local socket specified,
+      return "error: connection illegal for this process".  If there is
+      no room to create a new connection, return "error: insufficient
+      resources".
+
+   LISTEN STATE
+
+   *  If the OPEN call is active and the remote socket is specified,
+      then change the connection from passive to active, select an ISS.
+      Send a SYN segment, set SND.UNA to ISS, SND.NXT to ISS+1.  Enter
+      SYN-SENT state.  Data associated with SEND may be sent with SYN
+      segment or queued for transmission after entering ESTABLISHED
+      state.  The urgent bit if requested in the command must be sent
+      with the data segments sent as a result of this command.  If there
+      is no room to queue the request, respond with "error: insufficient
+      resources".  If the remote socket was not specified, then return
+      "error: remote socket unspecified".
+
+   SYN-SENT STATE
+
+   SYN-RECEIVED STATE
+
+   ESTABLISHED STATE
+
+   FIN-WAIT-1 STATE
+
+   FIN-WAIT-2 STATE
+
+   CLOSE-WAIT STATE
+
+   CLOSING STATE
+
+   LAST-ACK STATE
+
+   TIME-WAIT STATE
+
+   *  Return "error: connection already exists".
+
+3.10.2.  SEND Call
+
+   CLOSED STATE (i.e., TCB does not exist)
+
+   *  If the user does not have access to such a connection, then return
+      "error: connection illegal for this process".
+
+   *  Otherwise, return "error: connection does not exist".
+
+   LISTEN STATE
+
+   *  If the remote socket is specified, then change the connection from
+      passive to active, select an ISS.  Send a SYN segment, set SND.UNA
+      to ISS, SND.NXT to ISS+1.  Enter SYN-SENT state.  Data associated
+      with SEND may be sent with SYN segment or queued for transmission
+      after entering ESTABLISHED state.  The urgent bit if requested in
+      the command must be sent with the data segments sent as a result
+      of this command.  If there is no room to queue the request,
+      respond with "error: insufficient resources".  If the remote
+      socket was not specified, then return "error: remote socket
+      unspecified".
+
+   SYN-SENT STATE
+
+   SYN-RECEIVED STATE
+
+   *  Queue the data for transmission after entering ESTABLISHED state.
+      If no space to queue, respond with "error: insufficient
+      resources".
+
+   ESTABLISHED STATE
+
+   CLOSE-WAIT STATE
+
+   *  Segmentize the buffer and send it with a piggybacked
+      acknowledgment (acknowledgment value = RCV.NXT).  If there is
+      insufficient space to remember this buffer, simply return "error:
+      insufficient resources".
+
+   *  If the URGENT flag is set, then SND.UP <- SND.NXT and set the
+      urgent pointer in the outgoing segments.
+
+   FIN-WAIT-1 STATE
+
+   FIN-WAIT-2 STATE
+
+   CLOSING STATE
+
+   LAST-ACK STATE
+
+   TIME-WAIT STATE
+
+   *  Return "error: connection closing" and do not service request.
+
+3.10.3.  RECEIVE Call
+
+   CLOSED STATE (i.e., TCB does not exist)
+
+   *  If the user does not have access to such a connection, return
+      "error: connection illegal for this process".
+
+   *  Otherwise, return "error: connection does not exist".
+
+   LISTEN STATE
+
+   SYN-SENT STATE
+
+   SYN-RECEIVED STATE
+
+   *  Queue for processing after entering ESTABLISHED state.  If there
+      is no room to queue this request, respond with "error:
+      insufficient resources".
+
+   ESTABLISHED STATE
+
+   FIN-WAIT-1 STATE
+
+   FIN-WAIT-2 STATE
+
+   *  If insufficient incoming segments are queued to satisfy the
+      request, queue the request.  If there is no queue space to
+      remember the RECEIVE, respond with "error: insufficient
+      resources".
+
+   *  Reassemble queued incoming segments into receive buffer and return
+      to user.  Mark "push seen" (PUSH) if this is the case.
+
+   *  If RCV.UP is in advance of the data currently being passed to the
+      user, notify the user of the presence of urgent data.
+
+   *  When the TCP endpoint takes responsibility for delivering data to
+      the user, that fact must be communicated to the sender via an
+      acknowledgment.  The formation of such an acknowledgment is
+      described below in the discussion of processing an incoming
+      segment.
+
+   CLOSE-WAIT STATE
+
+   *  Since the remote side has already sent FIN, RECEIVEs must be
+      satisfied by data already on hand, but not yet delivered to the
+      user.  If no text is awaiting delivery, the RECEIVE will get an
+      "error: connection closing" response.  Otherwise, any remaining
+      data can be used to satisfy the RECEIVE.
+
+   CLOSING STATE
+
+   LAST-ACK STATE
+
+   TIME-WAIT STATE
+
+   *  Return "error: connection closing".
+
+3.10.4.  CLOSE Call
+
+   CLOSED STATE (i.e., TCB does not exist)
+
+   *  If the user does not have access to such a connection, return
+      "error: connection illegal for this process".
+
+   *  Otherwise, return "error: connection does not exist".
+
+   LISTEN STATE
+
+   *  Any outstanding RECEIVEs are returned with "error: closing"
+      responses.  Delete TCB, enter CLOSED state, and return.
+
+   SYN-SENT STATE
+
+   *  Delete the TCB and return "error: closing" responses to any queued
+      SENDs, or RECEIVEs.
+
+   SYN-RECEIVED STATE
+
+   *  If no SENDs have been issued and there is no pending data to send,
+      then form a FIN segment and send it, and enter FIN-WAIT-1 state;
+      otherwise, queue for processing after entering ESTABLISHED state.
+
+   ESTABLISHED STATE
+
+   *  Queue this until all preceding SENDs have been segmentized, then
+      form a FIN segment and send it.  In any case, enter FIN-WAIT-1
+      state.
+
+   FIN-WAIT-1 STATE
+
+   FIN-WAIT-2 STATE
+
+   *  Strictly speaking, this is an error and should receive an "error:
+      connection closing" response.  An "ok" response would be
+      acceptable, too, as long as a second FIN is not emitted (the first
+      FIN may be retransmitted, though).
+
+   CLOSE-WAIT STATE
+
+   *  Queue this request until all preceding SENDs have been
+      segmentized; then send a FIN segment, enter LAST-ACK state.
+
+   CLOSING STATE
+
+   LAST-ACK STATE
+
+   TIME-WAIT STATE
+
+   *  Respond with "error: connection closing".
+
+3.10.5.  ABORT Call
+
+   CLOSED STATE (i.e., TCB does not exist)
+
+   *  If the user should not have access to such a connection, return
+      "error: connection illegal for this process".
+
+   *  Otherwise, return "error: connection does not exist".
+
+   LISTEN STATE
+
+   *  Any outstanding RECEIVEs should be returned with "error:
+      connection reset" responses.  Delete TCB, enter CLOSED state, and
+      return.
+
+   SYN-SENT STATE
+
+   *  All queued SENDs and RECEIVEs should be given "connection reset"
+      notification.  Delete the TCB, enter CLOSED state, and return.
+
+   SYN-RECEIVED STATE
+
+   ESTABLISHED STATE
+
+   FIN-WAIT-1 STATE
+
+   FIN-WAIT-2 STATE
+
+   CLOSE-WAIT STATE
+
+   *  Send a reset segment:
+
+      <SEQ=SND.NXT><CTL=RST>
+
+   *  All queued SENDs and RECEIVEs should be given "connection reset"
+      notification; all segments queued for transmission (except for the
+      RST formed above) or retransmission should be flushed.  Delete the
+      TCB, enter CLOSED state, and return.
+
+   CLOSING STATE
+
+   LAST-ACK STATE
+
+   TIME-WAIT STATE
+
+   *  Respond with "ok" and delete the TCB, enter CLOSED state, and
+      return.
+
+3.10.6.  STATUS Call
+
+   CLOSED STATE (i.e., TCB does not exist)
+
+   *  If the user should not have access to such a connection, return
+      "error: connection illegal for this process".
+
+   *  Otherwise, return "error: connection does not exist".
+
+   LISTEN STATE
+
+   *  Return "state = LISTEN" and the TCB pointer.
+
+   SYN-SENT STATE
+
+   *  Return "state = SYN-SENT" and the TCB pointer.
+
+   SYN-RECEIVED STATE
+
+   *  Return "state = SYN-RECEIVED" and the TCB pointer.
+
+   ESTABLISHED STATE
+
+   *  Return "state = ESTABLISHED" and the TCB pointer.
+
+   FIN-WAIT-1 STATE
+
+   *  Return "state = FIN-WAIT-1" and the TCB pointer.
+
+   FIN-WAIT-2 STATE
+
+   *  Return "state = FIN-WAIT-2" and the TCB pointer.
+
+   CLOSE-WAIT STATE
+
+   *  Return "state = CLOSE-WAIT" and the TCB pointer.
+
+   CLOSING STATE
+
+   *  Return "state = CLOSING" and the TCB pointer.
+
+   LAST-ACK STATE
+
+   *  Return "state = LAST-ACK" and the TCB pointer.
+
+   TIME-WAIT STATE
+
+   *  Return "state = TIME-WAIT" and the TCB pointer.
+
+3.10.7.  SEGMENT ARRIVES
+
+3.10.7.1.  CLOSED STATE
+
+   If the state is CLOSED (i.e., TCB does not exist), then
+
+      all data in the incoming segment is discarded.  An incoming
+      segment containing a RST is discarded.  An incoming segment not
+      containing a RST causes a RST to be sent in response.  The
+      acknowledgment and sequence field values are selected to make the
+      reset sequence acceptable to the TCP endpoint that sent the
+      offending segment.
+
+      If the ACK bit is off, sequence number zero is used,
+
+         <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>
+
+      If the ACK bit i
