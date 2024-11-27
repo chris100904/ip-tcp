@@ -551,7 +551,6 @@ impl Tcp {
                 }
               }
             } else if socket_status == SocketStatus::LastAck {
-              println!("519");
               // If you receive an ACK that is 1 greater than current SEQ, then can transition to CLOSED and initiate teardown
               if let TcpSocket::Stream(stream) = socket.tcp_socket {
                 {
@@ -590,6 +589,7 @@ impl Tcp {
                 stream.teardown_connection();
                 
                 tcp_clone.lock().unwrap().remove_socket(&socket_key);
+                println!("Socket closed");
               }
             } else {
               // If not, drop the packet.
@@ -708,6 +708,7 @@ impl Tcp {
                 });
                 // clean up anything here in TCP
                 tcp_clone.lock().unwrap().remove_socket(&socket_key);
+                println!("Socket closed");
               }
             } else {
               println!("{}", socket_status.to_string());
@@ -765,6 +766,7 @@ impl Tcp {
 
                 // clean up anything in tcp here
                 tcp_clone.lock().unwrap().remove_socket(&socket_key);
+                println!("Socket closed");
               }
             }
           })
