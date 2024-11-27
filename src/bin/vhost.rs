@@ -97,7 +97,6 @@ pub fn receive_tcp_packet(tcp_clone: Arc<Mutex<Tcp>>, tcp_recv_ip: Receiver<(Pac
   loop{
     match tcp_recv_ip.recv() {
       Ok((packet, src_ip)) => {
-        
         if let Err(e) = Tcp::receive_packet(Arc::clone(&tcp_clone), packet) {
           eprintln!("{e}");
         }

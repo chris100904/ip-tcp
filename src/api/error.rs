@@ -16,4 +16,6 @@ pub enum TcpError {
     FileError { message: String },
     #[error("Read Error: {}", message)]
     ReadError { message: String },
+    #[error("Retransmission Error: {}", message)]
+    RTError { message: String },
 }
