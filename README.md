@@ -10,11 +10,33 @@ This document dives into the design choices Christopher Chen and Ethan Park made
 
 ### 2. At a high level, how does your TCP logic (sending, receiving, retransmissions, etc.) use threads, and how do they interact with each other (and your data structures)? 
 
+Here is a list of all of our threads:
+1. REPL thread responsible for listening to command line prompts
+2. Vhost and Vrouter thread responsible for calling all respective commands from the REPL thread
+3. Vhost thread responsible for receiving packets
+4. Listening thread for every listener initialized
+5. For each socket, there is a thread responsible for sending tcp packets.
+6. For each socket, there is a asynchronous retransmission thread.
+7. A new thread gets made for teardown so there are no self dependencies for the code to complete.
+
+When vhost gets initialized, threads 1, 2, and 3 are also created. Thread 1 directly communicates with 2 via channel and send a command enum. Thread 2 is created with the TCP object (struct data structure), calling commands that call the Arc Mutex protected version of the TCP object (we call it safe_tcp). Thread 3 is also created for the vhost to communicate with the tcp object so that the packet can be parsed in tcp.
+
+When listen_and_accept() gets called, thread 4 gets created, which updates the socket_table object in the tcp struct. Thread 4 also contains the code for accept(), which is responsible for the handshake and the actual creation of the Socket objects. 
+
+After accept() is called, threads 5 and 6 are created. Thread 5 accesses the TCP object (for overall socket_table information) and its own TCPStream socket object to update all necessary parameters. These parameters are also shared with thread 6. 
+
+The communication between threads responsible for blocking receiving and sending (i.e., in the handshake) is handled largely via condition variables. Retransmission is handled with a VecDeque along with a condition variables. All shared data is wrapped in an Arc Mutex. The only instance where an object is not wrapped in an Arc Mutex in the TcpStream, TcpListener, Socket, or RTEntry objects is if the object is not ever mutated after initialization.
+
+Thread 7 notifies all running threads to terminate processes.
+
 ### 3. If you could do this assignment again, what would you change? Any ideas for how you might improve performance?
+
+Most of the project would’ve been the same. If we were to go about this again, we would’ve focused more on writing cleaner code and making sure to refactor code that might’ve been duplicated or redundant. On the grand scheme of the project, all the logic would’ve been roughly the same. One thing that we might want to try is to see if there are any alternatives to sending that didn’t require a separate sending thread. For example, maybe we could link the thread that is responsible for writing into the buffer to the sending thread to see if it would’ve helped the bug that we had in our final submission.
 
 ### 4. If you have any other major bugs or limitations not mentioned in the previous question, please describe the bug and how you have tried to debug the problem. 
 
-       The only bug that we have noted as of our final submission is that when our debugging print statements are deleted, testing with loss no longer works for some reason. We're not entirely sure why this is as it seems sort of counterintuitive (debugging statements should be increasing the latency...), but we did not proceed to debug this since we were running out of time.
+       A bug that we have noted as of our final submission is that when our debugging print statements are deleted, testing with loss no longer works for some reason. We're not entirely sure why this is as it seems sort of counterintuitive (debugging statements should be increasing the latency...), but we did not proceed to debug this since we were running out of time.
+       An additional bug we encountered was that our code can only successfully send the MB file if there is a 100 ms sleep in the sending thread. We have added extensive print statements, wireshark captures, cleaned up all lock waits and tried different RTOs but were still unable to figure out why the program was not able to handle a higher rate of sending bytes.
 
 ## Packet Capture
 
